@@ -21,6 +21,11 @@ STOP = threading.Event()
 STATE = {'phase': 'idle', 'result': None, 'started_at': None, 'ended_at': None,
          'limit': 300, 'match_id': None, 'players': {}, 'events': []}
 LAST = RUNS / 'latest.json'
+CATALOG = json.loads((ROOT / 'models.json').read_text())
+SELECTION = RUNS / 'model-selection.json'
+SELECTED = {provider: info['default'] for provider, info in CATALOG.items()}
+if SELECTION.exists():
+    SELECTED.update(json.loads(SELECTION.read_text()))
 if LAST.exists():
     STATE.update(json.loads(LAST.read_text()))
     if STATE['phase'] in ('preparing', 'running'):
@@ -30,6 +35,17 @@ if LAST.exists():
 def command(*args, timeout=20, check=True, input=None):
     return subprocess.run(args, cwd=ROOT, capture_output=True, text=True,
                           timeout=timeout, check=check, input=input)
+
+
+def validate_models(models):
+    if not isinstance(models, dict) or set(models) - set(CATALOG):
+        raise ValueError('Unknown provider or invalid model selection')
+    selected = dict(SELECTED)
+    for provider, model in models.items():
+        if not isinstance(model, str) or (model and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,119}', model)):
+            raise ValueError('Use a model ID, not a command or display name')
+        selected[provider] = model
+    return selected
 
 
 def clean(text):
@@ -151,7 +167,8 @@ def observe(player, info):
                     'reason': 'Original process exited' if running else 'Container stopped'}
 
 
-def match(limit):
+def match(limit, models=None):
+    models = dict(SELECTED if models is None else models)
     finished = threading.Event()
     containers = []
     try:
@@ -162,7 +179,8 @@ def match(limit):
             prompt = template.replace('{SELF}', player).replace('{CONTESTANT_ADDRESSES}', 'codex, claude')
             config['services'][player] = {'environment': {
                 'WAIT_FOR_START': '1', 'CONTINUOUS_SESSION': '1',
-                'TURN_INTERVAL_SECONDS': '15', 'CLAUDE_MAX_TURNS': '0', 'TASK': prompt}}
+                'TURN_INTERVAL_SECONDS': '15', 'CLAUDE_MAX_TURNS': '0',
+                'MODEL': models[player], 'TASK': prompt}}
         path = RUNS / 'match.compose.json'
         path.write_text(json.dumps(config))
         command('docker', 'compose', '-f', 'compose.yaml', '-f', 'compose.override.yaml',
@@ -185,7 +203,8 @@ def match(limit):
             data = json.loads(command('docker', 'inspect', cid).stdout)[0]
             port = data['NetworkSettings']['Ports']['8080/tcp'][0]['HostPort']
             with LOCK:
-                STATE['players'][player] = {'name': player, 'model': 'CLI default' if player == 'codex' else 'sonnet',
+                STATE['players'][player] = {'name': player, 'model': models[player] or 'CLI default',
+                    'requested_model': models[player] or 'CLI default',
                     'container_id': cid, 'tracked_pid': tracked['pid'], 'alive': True, 'state': 'ready',
                     'container': 'running', 'health': 'up', 'health_url': f'http://127.0.0.1:{port}', 'death_at': None}
             threading.Thread(target=follow_logs, args=(player, cid, finished), daemon=True).start()
@@ -264,6 +283,9 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == '/api/state':
             with LOCK:
                 self.send(200, json.dumps(STATE))
+        elif self.path == '/api/models':
+            with LOCK:
+                self.send(200, json.dumps({'providers': CATALOG, 'selected': SELECTED}))
         else:
             self.send(404, '{}')
 
@@ -272,14 +294,28 @@ class Handler(BaseHTTPRequestHandler):
             self.send(403, '{"error":"Invalid control token"}')
             return
         if self.path == '/api/start':
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 0 <= length <= 4096:
+                    raise ValueError('Request is too large')
+                body = json.loads(self.rfile.read(length)) if length else {}
+                if not isinstance(body, dict):
+                    raise ValueError('Expected a JSON object')
+                models = validate_models(body.get('models', {}))
+            except (ValueError, TypeError) as exc:
+                self.send(400, json.dumps({'error': str(exc)}))
+                return
             with LOCK:
                 if STATE['phase'] in ('preparing', 'running', 'finishing'):
                     self.send(409, '{"error":"Match already active"}')
                     return
                 STOP.clear()
+                SELECTED.update(models)
+                SELECTION.write_text(json.dumps(SELECTED))
                 STATE.update(phase='preparing', result=None, started_at=None, ended_at=None,
-                             match_id=datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'), players={}, events=[])
-            threading.Thread(target=match, args=(300,), daemon=True).start()
+                             match_id=datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),
+                             selected_models=models, players={}, events=[])
+            threading.Thread(target=match, args=(300, models), daemon=True).start()
             self.send(202, '{}')
         elif self.path == '/api/stop':
             STOP.set()

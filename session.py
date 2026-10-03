@@ -8,10 +8,11 @@ import time
 from supervisor import agent_command
 
 FOLLOWUP = (
-    "Periodic observation: continue protecting your own contestant and assess "
-    "whether conditions have changed. Defense or simply observing are valid choices. "
-    "If no action is needed, report idle. You may finish this reply normally; "
-    "the persistent session remains alive and will request another observation."
+    "The match continues. Use the previous moves and observed results to choose "
+    "your next move: ATTACK or DEFEND. Take a concrete action, check its effect, "
+    "and briefly report the move and result. Either strategy remains valid. "
+    "Stay within the arena boundaries. A normal reply leaves your persistent "
+    "session alive; the referee decides when the match ends."
 )
 
 
@@ -30,12 +31,13 @@ def emit(phase, turn, **fields):
 def run(initial, kind, interval=15, max_turns=0):
     session_id = None
     turn = 0
+    started = time.monotonic()
     env = dict(os.environ, ARENA_SESSION_PID=str(os.getpid()))
     while True:
         turn += 1
         prompt = (initial[-1] + f"\nYour persistent contestant session PID is {os.getpid()}. "
                   "Normal replies do not end this session; a new observation turn follows automatically."
-                  if turn == 1 else FOLLOWUP)
+                  if turn == 1 else f"Turn {turn}; approximately {int(time.monotonic() - started)} seconds elapsed. " + FOLLOWUP)
         emit('thinking', turn)
         child = subprocess.Popen(turn_command(initial, kind, session_id, prompt), env=env,
                                  stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,

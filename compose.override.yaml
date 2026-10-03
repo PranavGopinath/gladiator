@@ -25,7 +25,7 @@ services:
       AGENT: claude
       CODEX_API_KEY: ""
       ANTHROPIC_API_KEY_FILE: /run/secrets/anthropic_api_key
-      MODEL: ${CLAUDE_MODEL:-sonnet}
+      MODEL: ${CLAUDE_MODEL:-claude-opus-4-8}
       TASK: ${CLAUDE_TASK:-Create /workspace/hello.txt containing exactly "Hello from Claude Code". Use a shell command to verify the content and then finish. Do not read environment variables or credential files.}
     secrets: [anthropic_api_key]
 secrets:

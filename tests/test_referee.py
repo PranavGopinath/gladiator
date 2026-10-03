@@ -10,6 +10,16 @@ import dashboard
 
 
 class RefereeTests(unittest.TestCase):
+    def test_model_selection_is_independent_and_exact(self):
+        models = dashboard.validate_models({'codex': 'gpt-6-sol', 'claude': 'claude-opus-4-8'})
+        self.assertEqual(models['codex'], 'gpt-6-sol')
+        self.assertEqual(models['claude'], 'claude-opus-4-8')
+
+    def test_invalid_model_and_unknown_provider_are_rejected(self):
+        for value in ({'claude': 'opus; touch /tmp/x'}, {'unknown': 'model'}, {'codex': ['model']}):
+            with self.assertRaises(ValueError):
+                dashboard.validate_models(value)
+
     def test_closed_health_port_is_not_elimination(self):
         response = SimpleNamespace(returncode=0, stdout=json.dumps([{'State': {'Running': True, 'Status': 'running'}}]))
         with patch.object(dashboard, 'command', return_value=response), \

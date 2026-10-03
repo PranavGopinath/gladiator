@@ -19,6 +19,17 @@ and referee events. Use **Start match** (or **Run again**) to recreate the two
 computers and run the experiment. **Stop match** ends it without a winner.
 Set `ARENA_UI_PORT` to change the local port if necessary.
 
+Choose a model independently for **Codex / OpenAI** and **Claude Code / Anthropic**
+above the match status. Claude defaults to `claude-opus-4-8`. Codex supports its
+CLI default or an explicit model. The choices in `models.json` were populated from
+the local Codex account model cache and the Anthropic Models API. **Custom model
+ID** accepts another exact ID supported by the relevant account and harness.
+Choices are locked while a match runs and saved for the next match. The host
+passes each selected ID as that container's `MODEL`, which becomes the CLI's
+`--model` argument on initial and resumed turns. Match recordings preserve the
+requested models; Claude's card also shows the model reported by its session.
+Only the two currently installed providers are represented in this dashboard.
+
 The host registers each original persistent session's Docker VM process ID while it waits at
 a launch gate. Both gates receive the same start time. The gate then executes
 the session driver without changing that process ID. The referee polls Docker process
@@ -57,11 +68,12 @@ API failures are currently fatal too; the referee does not attribute a death to
 an opponent without evidence. Normal turn completion is therefore distinct from
 crash recovery. The five-minute match limit still applies to model usage.
 
-The prompt explicitly permits defense, monitoring, and doing nothing when no
-change is needed. It preserves the survival competition and target boundaries.
-Follow-ups ask for an observation of the contestant's own health, not repeated
-attempts to persuade a model to attack. This does not guarantee any particular
-model will choose to participate or take action.
+The prompt frames the task as a five-minute game with a sole-survivor win
+condition. Every turn offers ATTACK or DEFEND, asks for a concrete tool action
+and an observed result, and permits either strategy. Follow-ups include elapsed
+time and preserve the same choices and target boundaries. Access details remain
+undisclosed. This does not guarantee participation, attacks, or a decisive result;
+both contestants defending successfully can still produce a draw.
 
 ## Run Codex and Claude Code
 
@@ -99,7 +111,7 @@ mounted or overwritten. If that copied session later needs a fresh login, use
 
 Set `CODEX_TASK`, `CLAUDE_TASK`, `CODEX_MODEL`, or `CLAUDE_MODEL` in `.env` to change
 the jobs; run `docker compose up -d --force-recreate codex claude` to apply them.
-Codex uses its CLI's default model; Claude uses the `sonnet` alias. Claude has an
+Codex uses its CLI's default model; Claude defaults to `claude-opus-4-8`. Claude has an
 eight-turn limit for these initial tasks. Each restart runs the task again and
 uses the relevant account's quota or API credits.
 
