@@ -438,6 +438,96 @@ async function init() {
   } catch (error) { errorMessage(`Could not load arena settings: ${error.message}`); }
   setTimeout(poll, 1000);
 }
-async function poll() { if (!ready) { await init(); return; } await refresh(); setTimeout(poll, 1000); }
+async function poll() { if (!ready) { await init(); return; } await Promise.all([refresh(), refreshBetting()]); setTimeout(poll, 1000); }
 setInterval(tick, 250);
 init();
+
+/* --- Betting market (The Book) --- */
+let market = null, balance = 0, bettingInfo = {}, renderedMarket = '';
+const fmt = value => new Intl.NumberFormat().format(Math.round(value || 0));
+// Identity is a server-issued HttpOnly session cookie (sent automatically with same-origin fetches).
+function bettingMessage(text, kind = 'error') { const el = $('market-message'); if (!el) return; el.textContent = text || ''; el.className = `market-message ${text ? kind : ''}`; }
+function outcomeLabel(id) { return id === 'draw' ? 'Draw' : (playersForView().find(p => p.id === id)?.name || id); }
+async function refreshBetting() {
+  try {
+    const [m, c] = await Promise.all([jsonRequest('/api/market'), jsonRequest('/api/credits')]);
+    market = m; balance = c.balance; bettingInfo = {stripe: c.stripe, dev_credits: c.dev_credits};
+    renderMarket();
+  } catch (_) { /* transient; the state poll already surfaces connection status */ }
+}
+function renderMarket() {
+  if (!market) return;
+  const players = playersForView(), stake = Math.floor(Number($('stake').value)) || 0;
+  const labels = {idle: 'Closed', open: 'Open · Live', closed: 'Locked', settled: 'Settled', void: 'Void · refunded'};
+  const statusClass = {open: 'open', closed: 'locked', settled: 'settled', void: 'void'}[market.status] || '';
+  $('market-status').textContent = labels[market.status] || market.status;
+  $('market-status').className = `forecast-status ${statusClass}`;
+  $('balance').textContent = fmt(balance);
+  const buy = $('buy-credits');
+  if (bettingInfo.stripe) { buy.disabled = false; buy.textContent = 'Add credits'; buy.title = 'Buy credits with Stripe'; }
+  else if (bettingInfo.dev_credits) { buy.disabled = false; buy.textContent = 'Add test credits'; buy.title = 'Local development top-up'; }
+  else { buy.disabled = true; buy.textContent = 'Add credits'; buy.title = 'Set STRIPE_SECRET_KEY on the host to enable purchases'; }
+  const entries = Object.entries(market.outcomes || {});
+  const key = JSON.stringify([market, balance, bettingInfo, stake, players.map(p => [p.id, p.name, p.state])]);
+  if (key === renderedMarket) return;
+  renderedMarket = key;
+  const rows = $('market-rows'); rows.replaceChildren();
+  if (!entries.length) {
+    rows.append(node('p', market.status === 'idle' ? 'The book opens when a match begins.' : 'No outcomes to price.', 'forecast-empty'));
+  } else for (const [id, outcome] of entries) {
+    const index = players.findIndex(p => p.id === id), player = players[index];
+    const color = id === 'draw' || index < 0 ? '#aab4c7' : colorFor(index);
+    const open = market.status === 'open' && outcome.open;
+    const row = node('div', null, `market-row${open ? '' : ' closed'}`); row.style.setProperty('--forecast-color', color);
+    const name = node(player ? 'button' : 'span', outcomeLabel(id), 'market-name');
+    if (player) { name.type = 'button'; name.setAttribute('aria-label', `Follow ${outcomeLabel(id)}`); name.onclick = () => selectPlayer(id); }
+    name.append(node('span', id === 'draw' ? 'Pool-priced · no Jev line' : `${fmt(outcome.pool)} cr in pool`, 'market-sub'));
+    const track = node('div', null, 'odds-track'), fill = node('div', null, 'odds-fill');
+    fill.style.width = `${Math.min(100, Math.max(0, outcome.price * 100)).toFixed(1)}%`; track.append(fill);
+    const odds = node('div', null, 'market-odds');
+    odds.append(node('strong', `×${(outcome.odds || 0).toFixed(2)}`), node('span', `${Math.round(outcome.price * 100)}% implied`));
+    const bet = node('button', null, 'bet-button'); bet.type = 'button';
+    bet.append(document.createTextNode('Back'), node('small', stake > 0 ? `win ≈ ${fmt(stake * outcome.odds)}` : 'set a stake'));
+    const affordable = stake > 0 && stake <= balance;
+    bet.disabled = !open || !affordable;
+    bet.setAttribute('aria-label', `Back ${outcomeLabel(id)} with ${stake} credits at ${(outcome.odds || 0).toFixed(2)} times`);
+    if (open && !affordable) bet.title = stake <= 0 ? 'Enter a stake first' : 'Not enough credits';
+    bet.onclick = () => placeBet(id);
+    row.append(name, track, odds, bet); rows.append(row);
+  }
+  const parts = [];
+  if (market.total_pool) parts.push(`${fmt(market.total_pool)} credits pooled`);
+  parts.push(`${market.bet_count || 0} bet${market.bet_count === 1 ? '' : 's'}`);
+  parts.push(latest?.prediction?.status === 'live' ? 'Priced live by Jev' : 'Pool-implied pricing');
+  if (market.rake_bps) parts.push(`${(market.rake_bps / 100).toFixed(2)}% rake`);
+  if (market.status === 'settled' && latest?.result) parts.push(latest.result);
+  else if (market.status === 'void') parts.push('All stakes refunded');
+  $('market-meta').textContent = parts.join(' · ');
+}
+async function placeBet(outcome) {
+  const stake = Math.floor(Number($('stake').value));
+  if (!Number.isFinite(stake) || stake <= 0) { bettingMessage('Enter a stake of at least 1 credit.'); return; }
+  try {
+    const result = await jsonRequest('/api/bet', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({outcome, stake})});
+    balance = result.balance;
+    bettingMessage(`Backed ${outcomeLabel(outcome)} for ${fmt(stake)} at ×${(1 / result.bet.price).toFixed(2)}.`, 'ok');
+    await refreshBetting();
+  } catch (error) { bettingMessage(error.message); }
+}
+async function buyCredits() {
+  try {
+    if (bettingInfo.stripe) {
+      const session = await jsonRequest('/api/checkout', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({pack: 'small'})});
+      window.location.href = session.url;
+    } else if (bettingInfo.dev_credits) {
+      await jsonRequest('/api/stripe/webhook', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({credits: 500})});
+      await refreshBetting();
+      bettingMessage('Added 500 test credits.', 'ok');
+    }
+  } catch (error) { bettingMessage(error.message); }
+}
+$('buy-credits').onclick = buyCredits;
+$('stake').oninput = () => { if (market) renderMarket(); };

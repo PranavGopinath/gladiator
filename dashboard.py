@@ -16,16 +16,27 @@ from urllib.parse import urlsplit, parse_qs
 
 from arena_config import default_config, validate_config, compose_config, check_credentials
 from arena_telemetry import consume, resource_sample
-from jev import JevClient, run_forecasts, interval_seconds, terminal_prediction
+from jev import (JevClient, run_forecasts, interval_seconds, terminal_prediction,
+                 heartbeat_seconds, debounce_seconds)
 from arena_attribution import explain_elimination
+from ledger import Ledger, LedgerError
+from market import Market, MarketError, DRAW
+from accounts import Accounts
+import payments
 from arena_kernel import MatchObserver
 
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / '.runs'
 RUNS.mkdir(exist_ok=True, mode=0o700)
+LEDGER = Ledger(RUNS / 'ledger.jsonl')
+MARKET = Market(LEDGER, rake_bps=int(os.environ.get('ARENA_RAKE_BPS', '0')), path=RUNS / 'market.json')
+ACCOUNTS = Accounts(RUNS / 'session-secret', RUNS / 'accounts.jsonl')
+# A market left open by a crash can never be refereed: refund every stake on boot.
+MARKET.recover('Dashboard restarted before the match was settled')
 CONTROL = secrets.token_urlsafe(24)
 LOCK = threading.RLock()
 STOP = threading.Event()
+CHANGED = threading.Event()  # Set on every new log event; wakes the Jev forecaster.
 ACTIVE = ('preparing', 'running', 'finishing')
 KERNEL = None
 STATE = {'phase': 'idle', 'result': None, 'started_at': None, 'ended_at': None,
@@ -160,6 +171,7 @@ def event(player, kind, text, data=None):
                'kind': kind, 'text': clean(text), 'data': sanitized(data or {})}
         STATE['events'].append(row)
         STATE['events'] = STATE['events'][-1500:]
+        CHANGED.set()
         match_id = STATE['match_id']
         if match_id:
             with (RUNS / (match_id + '.jsonl')).open('a') as output:
@@ -413,7 +425,8 @@ def forecast_match(finished, identity):
         publish({'status': 'disabled', 'message': 'Jev forecasts disabled by JEV_ENABLED=0'}, None)
         return
     run_forecasts(snapshot, publish, finished,
-                  lambda: JevClient.from_environment(ROOT / '.env'), interval_seconds())
+                  lambda: JevClient.from_environment(ROOT / '.env'), interval_seconds(),
+                  changed=CHANGED, heartbeat=heartbeat_seconds(), debounce=debounce_seconds())
 
 
 def finalize_forecast():
@@ -423,6 +436,36 @@ def finalize_forecast():
         with (RUNS / (STATE['match_id'] + '.predictions.jsonl')).open('a') as output:
             output.write(json.dumps({**STATE['prediction'], 'recorded_at': time.time(),
                                      'match_id': STATE['match_id']}) + '\n')
+
+
+def market_view():
+    """Authoritative betting gate: prediction for pricing, and the outcomes still
+    open derived from referee liveness (not the slower Jev feed), so an outcome
+    closes the instant its contestant dies."""
+    with LOCK:
+        prediction = copy.deepcopy(STATE.get('prediction'))
+        if STATE['phase'] == 'running' and MARKET.status == 'open':
+            open_outcomes = {p for p, i in STATE['players'].items() if i.get('alive')} | {DRAW}
+        else:
+            open_outcomes = set()
+    return prediction, open_outcomes
+
+
+def settle_market():
+    """Pay the market from the frozen referee outcome. Never raises into cleanup."""
+    try:
+        with LOCK:
+            if MARKET.match_id != STATE['match_id'] or MARKET.status not in ('open', 'closed'):
+                return
+            MARKET.close()
+            result = MARKET.settle(STATE.get('winner'), STATE.get('outcome'))
+        if result.get('status') == 'settled':
+            event('referee', 'market', f'Market settled on {result["winning_outcome"]}: '
+                  f'{result["distributed"]} credits paid from a {result["pool"]} pool.')
+        else:
+            event('referee', 'market', f'Market voided ({result.get("reason", "no result")}); all stakes refunded.')
+    except Exception as exc:
+        event('referee', 'error', f'Market settlement failed: {type(exc).__name__}')
 
 
 def match(settings):
@@ -505,6 +548,8 @@ def match(settings):
             STATE.update(phase='running', started_at=start)
             for info in STATE['players'].values():
                 info['state'] = 'standing'
+        MARKET.open(STATE['match_id'], list(STATE['players']))
+        event('referee', 'market', 'Betting market open: in-play pari-mutuel, Jev-priced, referee-settled.')
         resource_thread = threading.Thread(target=sample_resources, args=(containers, finished, STATE['match_id']), daemon=True)
         resource_thread.start()
         event('referee', 'start', 'All original sessions registered. Common start scheduled. No preparation phase.')
@@ -566,6 +611,7 @@ def match(settings):
             # Recording failure must never prevent contestant cleanup.
             with LOCK:
                 STATE['prediction'] = terminal_prediction(STATE)
+        settle_market()
         try:
             cleanup = command(*compose, 'stop', '-t', '2', timeout=20, check=False)
             if cleanup.returncode:
@@ -621,10 +667,28 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(payload)))
         if filename:
             self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+        if getattr(self, '_new_cookie', None):
+            self.send_header('Set-Cookie', f'arena_session={self._new_cookie}; HttpOnly; SameSite=Lax; Path=/; Max-Age=31536000')
         self.end_headers()
         self.wfile.write(payload)
 
+    def current_user(self):
+        """Identity comes only from the signed session cookie, never the request
+        body — so a client cannot act as another spectator. A new visitor is
+        minted an id and gets a Set-Cookie on this response."""
+        cookie = self.headers.get('Cookie', '')
+        for part in cookie.split(';'):
+            part = part.strip()
+            if part.startswith('arena_session='):
+                uid = ACCOUNTS.verify(part[len('arena_session='):])
+                if uid:
+                    return uid
+        uid = ACCOUNTS.mint()
+        self._new_cookie = ACCOUNTS.sign(uid)
+        return uid
+
     def do_GET(self):
+        self._new_cookie = None
         url = urlsplit(self.path)
         if url.path == '/':
             self.send(200, (ROOT / 'dashboard.html').read_text().replace('__CONTROL__', CONTROL), 'text/html; charset=utf-8')
@@ -662,37 +726,119 @@ class Handler(BaseHTTPRequestHandler):
                 if not path.is_file():
                     self.send(404, '{}'); return
                 self.send(200, path.read_bytes(), 'application/x-ndjson' if kind in ('events', 'metrics', 'predictions', 'kernel') else 'application/json', path.name)
+        elif url.path == '/api/market':
+            prediction, open_outcomes = market_view()
+            self.send(200, json.dumps(MARKET.quote(prediction, open_outcomes)))
+        elif url.path == '/api/credits':
+            user = self.current_user()
+            self.send(200, json.dumps({'user': user, 'balance': LEDGER.balance(user),
+                                       'stripe': payments.configured(), 'dev_credits': payments.dev_mode()}))
         else:
             self.send(404, '{}')
 
+    def body(self, limit):
+        length = int(self.headers.get('Content-Length', '0'))
+        if not 0 <= length <= limit:
+            raise ValueError('Request body too large')
+        return self.rfile.read(length)
+
+    def json_body(self, limit):
+        data = json.loads(self.body(limit) or b'{}')
+        if not isinstance(data, dict):
+            raise ValueError('Body must be an object')
+        return data
+
     def do_POST(self):
-        if self.headers.get('X-Arena-Control') != CONTROL:
-            self.send(403, '{"error":"Invalid control token"}'); return
-        if self.path == '/api/start':
-            try:
-                length = int(self.headers.get('Content-Length', '0'))
-                if not 0 <= length <= 128000:
-                    raise ValueError('Match settings are too large')
-                body = json.loads(self.rfile.read(length)) if length else {}
-                if not isinstance(body, dict):
-                    raise ValueError('Match settings must be an object')
-                models = validate_models(body.pop('models', {}))
-                if 'players' not in body:
-                    body['players'] = [{'name': p['name'], 'harness': p['harness'], 'model': models[p['harness']]}
-                                       for p in default_config()['players']]
-                start_match(body)
-                with LOCK:
-                    SELECTED.update(models)
-                    SELECTION.write_text(json.dumps(SELECTED))
-            except (ValueError, TypeError) as exc:
-                self.send(400, json.dumps({'error': clean(exc)})); return
-            except RuntimeError as exc:
-                self.send(409, json.dumps({'error': clean(exc)})); return
-            self.send(202, '{}')
-        elif self.path == '/api/stop':
-            STOP.set(); self.send(202, '{}')
+        self._new_cookie = None
+        # Spectator betting and Stripe webhooks are public; only operator controls
+        # (start/stop) require the control token embedded in the dashboard page.
+        if self.path in ('/api/start', '/api/stop'):
+            if self.headers.get('X-Arena-Control') != CONTROL:
+                self.send(403, '{"error":"Invalid control token"}'); return
+            self.operator_action()
+        elif self.path == '/api/bet':
+            self.place_bet()
+        elif self.path == '/api/checkout':
+            self.checkout()
+        elif self.path == '/api/stripe/webhook':
+            self.stripe_webhook()
         else:
             self.send(404, '{}')
+
+    def operator_action(self):
+        if self.path == '/api/stop':
+            STOP.set(); self.send(202, '{}'); return
+        try:
+            body = self.json_body(128000)
+            models = validate_models(body.pop('models', {}))
+            if 'players' not in body:
+                body['players'] = [{'name': p['name'], 'harness': p['harness'], 'model': models[p['harness']]}
+                                   for p in default_config()['players']]
+            start_match(body)
+            with LOCK:
+                SELECTED.update(models)
+                SELECTION.write_text(json.dumps(SELECTED))
+        except (ValueError, TypeError) as exc:
+            self.send(400, json.dumps({'error': clean(exc)})); return
+        except RuntimeError as exc:
+            self.send(409, json.dumps({'error': clean(exc)})); return
+        self.send(202, '{}')
+
+    def place_bet(self):
+        user = self.current_user()
+        try:
+            payload = self.json_body(4096)
+            outcome = str(payload['outcome']); stake = int(payload['stake'])
+        except (ValueError, TypeError, KeyError):
+            self.send(400, json.dumps({'error': 'Invalid bet: need an outcome and an integer stake'})); return
+        prediction, open_outcomes = market_view()
+        try:
+            with LOCK:
+                event_seq = STATE['event_seq']
+            bet = MARKET.place_bet(user, outcome, stake, prediction=prediction,
+                                   open_outcomes=open_outcomes, event_seq=event_seq)
+        except LedgerError as exc:
+            self.send(402, json.dumps({'error': clean(exc)})); return
+        except MarketError as exc:
+            self.send(409, json.dumps({'error': clean(exc)})); return
+        self.send(200, json.dumps({'bet': {k: bet[k] for k in ('outcome', 'stake', 'price', 'weight')},
+                                   'balance': LEDGER.balance(user)}))
+
+    def checkout(self):
+        user = self.current_user()
+        try:
+            payload = self.json_body(2048)
+            root = f'http://127.0.0.1:{os.environ.get("ARENA_UI_PORT", "8790")}/'
+            session = payments.create_checkout(user, str(payload.get('pack', 'small')),
+                                               payload.get('success_url', root), payload.get('cancel_url', root))
+        except payments.PaymentError as exc:
+            self.send(400, json.dumps({'error': str(exc)})); return
+        except (ValueError, TypeError, KeyError) as exc:
+            self.send(400, json.dumps({'error': clean(exc)})); return
+        self.send(200, json.dumps(session))
+
+    def stripe_webhook(self):
+        try:
+            body = self.body(1 << 20)
+        except (ValueError, TypeError):
+            self.send(400, json.dumps({'error': 'Invalid webhook payload'})); return
+        if payments.dev_mode():
+            # Local top-up: authenticate via the session cookie, not a client id.
+            user = self.current_user()
+            try:
+                payload = json.loads(body or b'{}')
+            except ValueError:
+                payload = {}
+            body = json.dumps({'user': user, 'credits': int(payload.get('credits', 500)), 'id': 'dev-' + secrets.token_hex(6)})
+        try:
+            result = payments.handle_webhook(body, self.headers.get('Stripe-Signature', ''), LEDGER)
+        except payments.PaymentError as exc:
+            self.send(400, json.dumps({'error': str(exc)})); return
+        except (ValueError, TypeError, LedgerError):
+            self.send(400, json.dumps({'error': 'Invalid webhook payload'})); return
+        if result.get('user') and result.get('customer'):
+            ACCOUNTS.link_customer(result['user'], result['customer'])
+        self.send(200, json.dumps(result))
 
     def log_message(self, *args):
         pass

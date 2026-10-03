@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import threading
 import unittest
 import urllib.error
@@ -152,6 +153,22 @@ class JevTests(unittest.TestCase):
             run_forecasts(lambda: state, lambda value, basis: updates.append(value), finished, FakeClient, interval=.01)
         self.assertEqual(updates[0]['status'], 'live')
         self.assertEqual(updates[0]['event_seq'], 4)
+
+    def test_change_signal_reevaluates_without_waiting_for_the_heartbeat(self):
+        state = snapshot(); finished = threading.Event(); changed = threading.Event(); calls = []
+        class FakeClient:
+            def evaluate(self, snap, context):
+                calls.append(time.monotonic())
+                if len(calls) >= 3:
+                    finished.set()
+                else:
+                    changed.set()  # more log activity: next pass must wake at once
+                return parse_response(response(snap), snap)
+        start = time.monotonic()
+        run_forecasts(lambda: state, lambda value, basis: None, finished, FakeClient,
+                      interval=.01, changed=changed, heartbeat=30, debounce=0)
+        self.assertGreaterEqual(len(calls), 3)
+        self.assertLess(time.monotonic() - start, 5)  # did not sleep the 30s heartbeat between calls
 
     def test_auth_failure_disables_worker_without_retrying(self):
         updates = []

@@ -54,6 +54,26 @@ def interval_seconds():
     return min(60, max(2, interval)) if math.isfinite(interval) else 5
 
 
+def _bounded_seconds(name, default, low, high):
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return min(high, max(low, value)) if math.isfinite(value) else default
+
+
+def heartbeat_seconds():
+    """Slow floor so time-driven signal (remaining time, deadline danger) still
+    moves the line when no new log events arrive."""
+    return _bounded_seconds('JEV_HEARTBEAT_SECONDS', 12, 2, 60)
+
+
+def debounce_seconds():
+    """Minimum spacing between event-triggered evaluations so one chatty turn
+    cannot fan a burst of log lines into a burst of API calls."""
+    return _bounded_seconds('JEV_DEBOUNCE_SECONDS', 0.75, 0, 5)
+
+
 def probability(value):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
         raise JevError('Jev returned an invalid probability')
@@ -226,8 +246,18 @@ def terminal_prediction(snapshot):
             'confidence': None, 'factors': {}, 'message': 'Actual result determined by the referee'}
 
 
-def run_forecasts(snapshot_fn, publish, finished, client_factory, interval=5):
-    """An independent worker; authentication errors disable scoring, not matches."""
+def run_forecasts(snapshot_fn, publish, finished, client_factory, interval=5,
+                  changed=None, heartbeat=None, debounce=0.0):
+    """An independent worker; authentication errors disable scoring, not matches.
+
+    When `changed` (a threading.Event) is supplied, the worker re-prices as soon
+    as a new log event signals it instead of on a fixed clock, coalescing a burst
+    of events into one call via the EvidenceLedger cursor. A `heartbeat` ceiling
+    still forces a re-evaluation when no events arrive, so time-based signal
+    (remaining time, deadline danger) keeps the line moving; a `debounce` floor
+    caps how often a chatty turn can trigger calls. On failure it ignores the
+    signal and falls back to exponential backoff.
+    """
     if finished.is_set():
         return
     try:
@@ -235,8 +265,13 @@ def run_forecasts(snapshot_fn, publish, finished, client_factory, interval=5):
     except JevError as error:
         publish({'status': 'disabled', 'message': str(error)}, None)
         return
+    ceiling = heartbeat if heartbeat else interval
     ledger, failures, evaluations = EvidenceLedger(), 0, 0
     while not finished.is_set():
+        # Clear before snapshotting so any event during this pass re-arms the
+        # signal and is not missed between evaluations.
+        if changed is not None:
+            changed.clear()
         snapshot = snapshot_fn()
         if snapshot['phase'] != 'running' or sum(bool(p.get('alive')) for p in snapshot['players'].values()) < 2:
             return
@@ -258,4 +293,17 @@ def run_forecasts(snapshot_fn, publish, finished, client_factory, interval=5):
             # Do not serialize arbitrary exceptions: they may contain secrets.
             failures += 1
             publish({'status': 'unavailable', 'message': 'Jev evaluation unavailable; retrying with backoff'}, snapshot)
-        finished.wait(min(60, interval * 2 ** min(failures, 4)))
+        if changed is None or failures:
+            finished.wait(min(60, interval * 2 ** min(failures, 4)))
+        else:
+            # Hold the debounce floor, then wake on the next log event or the
+            # heartbeat ceiling, whichever comes first. Poll in short slices so a
+            # finished match (which does not set `changed`) still exits promptly.
+            if debounce and finished.wait(debounce):
+                return
+            deadline = time.monotonic() + max(0, ceiling - debounce)
+            while not finished.is_set() and not changed.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                changed.wait(timeout=min(0.25, remaining))
