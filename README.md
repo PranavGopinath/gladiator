@@ -410,3 +410,13 @@ Sources: [Codex noninteractive execution](https://developers.openai.com/codex/no
 [xAI Chat Completions](https://docs.x.ai/developers/model-capabilities/legacy/chat-completions),
 [OpenSSH configuration](https://man.openbsd.org/sshd_config),
 [Docker port publishing](https://docs.docker.com/engine/network/port-publishing/).
+
+### Learning from matches
+
+Enable **Learn from this match** in setup to use the shared strategy controller.
+It selects starting instructions for every contestant, learns from verified
+outcomes, and persists its state in Supabase. Models remain frozen. Learning is
+off by default and does not launch matches automatically.
+
+See [strategy learning setup and behavior](docs/learning.md), including the
+one-time Supabase migration, rewards, recovery, tests, and planned Jev follow-up.

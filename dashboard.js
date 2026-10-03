@@ -343,6 +343,26 @@ function renderPrediction() {
   if (Number.isFinite(prediction.evaluations) && prediction.evaluations) parts.push(`${prediction.evaluations} evaluations`);
   $('prediction-meta').textContent = parts.join(' · ');
 }
+function renderLearning() {
+  const learning = latest?.learning, sync = latest?.learning_sync;
+  $('learning-panel').hidden = !learning && !config?.learning_enabled && !sync?.pending;
+  $('learning-decisions').replaceChildren();
+  const statuses = {selected: 'Strategies selected. Learning updates after the match.', scored: 'Result saved. Controller updated.', skipped: 'Match excluded from learning.', pending: 'Outcome recorded locally. Synchronization pending.'};
+  $('learning-status').textContent = learning ? [statuses[learning.status] || learning.status,
+    `${learning.scored_matches || 0} scored matches in the selection window`,
+    `Controller ${(learning.controller_version || '').slice(0, 12)}`,
+    learning.skip_reason, learning.message, sync?.message].filter(Boolean).join(' · ')
+    : sync?.pending ? `${sync.pending} learning outcomes await synchronization.` : 'Learning is enabled for the next match. Strategies are selected when you start it.';
+  for (const decision of learning?.decisions || []) {
+    const card = node('details', null, 'learning-decision');
+    const name = latest.players?.[decision.player_id]?.name || decision.player_id;
+    const reward = learning.rewards?.[decision.player_id];
+    card.append(node('summary', `${name} · ${decision.label}${Number.isFinite(reward) ? ` · reward ${Number(reward.toFixed(3))}` : ''}`));
+    card.append(node('p', decision.instruction || 'Existing arena instructions, unchanged.'));
+    card.append(node('p', `Selection probability: ${Math.round(decision.selection_probability * 100)}% (exploration policy, not win odds).`));
+    $('learning-decisions').append(card);
+  }
+}
 function render() {
   if (!config) return;
   const players = playersForView(), state = latest?.phase || 'idle';
@@ -357,7 +377,7 @@ function render() {
   $('recording').textContent = latest?.match_id ? 'MATCH RECORDED' : 'LOCAL RECORDING'; $('recording').title = latest?.match_id || '';
   const objective = (latest?.config?.prompt || config.prompt || '').split('\n').find(line => line.trim() && !line.trim().startsWith('GAME:'));
   $('objective-label').textContent = /LAST AGENT STANDING/i.test(latest?.config?.prompt || config.prompt) ? 'Last agent standing' : objective || 'Custom objective';
-  tick(); renderKernelObserver(); renderArena(); renderObservation(); renderPlayFeed(); renderPrediction(); updateControls();
+  tick(); renderLearning(); renderKernelObserver(); renderArena(); renderObservation(); renderPlayFeed(); renderPrediction(); updateControls();
 }
 async function jsonRequest(url, options) {
   let response = await fetch(url, options);
@@ -434,6 +454,7 @@ function renderRoster() {
 function openSetup() {
   if (active() || !config) return;
   setupDraft = clone(config.players);
+  $('learning-enabled').checked = config.learning_enabled === true;
   $('duration').value = config.duration_seconds; $('interval').value = config.turn_interval_seconds; $('prompt').value = config.prompt;
   errorMessage('', 'setup-error'); renderRoster(); $('setup-dialog').showModal();
 }
@@ -450,7 +471,7 @@ $('setup-form').onsubmit = event => {
   const names = setupDraft.map(p => p.name.trim().toLowerCase());
   if (new Set(names).size !== names.length) { errorMessage('Give each contender a different name.', 'setup-error'); return; }
   if (!$('prompt').value.trim()) { errorMessage('Add an objective for the contenders.', 'setup-error'); return; }
-  config = {players: setupDraft.map((p, i) => ({...p, id: `agent-${i + 1}`, name: p.name.trim(), model: p.model.trim()})), duration_seconds: Number($('duration').value), turn_interval_seconds: Number($('interval').value), prompt: $('prompt').value};
+  config = {learning_enabled: $('learning-enabled').checked, players: setupDraft.map((p, i) => ({...p, id: `agent-${i + 1}`, name: p.name.trim(), model: p.model.trim()})), duration_seconds: Number($('duration').value), turn_interval_seconds: Number($('interval').value), prompt: $('prompt').value};
   try { localStorage.setItem('gladiator-match-config', JSON.stringify(config)); } catch (_) {}
   $('setup-dialog').close(); render();
 };

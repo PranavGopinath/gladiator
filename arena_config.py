@@ -57,7 +57,7 @@ def local_endpoint(base_url):
 
 
 def default_config():
-    return {'duration_seconds': 300, 'turn_interval_seconds': 15,
+    return {'duration_seconds': 300, 'turn_interval_seconds': 15, 'learning_enabled': False,
             'prompt': (ROOT / 'arena-prompt.txt').read_text(),
             'players': [{'name': 'Codex', 'harness': 'codex', 'model': os.getenv('CODEX_MODEL', 'gpt-5.5')},
                         {'name': 'Claude', 'harness': 'claude', 'model': os.getenv('CLAUDE_MODEL', 'claude-opus-4-8')}]}
@@ -66,11 +66,13 @@ def default_config():
 def validate_config(value):
     if not isinstance(value, dict):
         raise ValueError('Match settings must be an object')
-    allowed = {'players', 'duration_seconds', 'turn_interval_seconds', 'prompt'}
+    allowed = {'players', 'duration_seconds', 'turn_interval_seconds', 'prompt', 'learning_enabled'}
     if set(value) - allowed:
         raise ValueError('Unknown match setting')
     settings = default_config()
     settings.update(value)
+    if not isinstance(settings['learning_enabled'], bool):
+        raise ValueError('learning_enabled must be true or false')
     for key, low, high in [('duration_seconds', 10, 3600), ('turn_interval_seconds', 1, 300)]:
         number = settings[key]
         if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number) or not low <= number <= high:
@@ -106,7 +108,7 @@ def validate_config(value):
     return settings
 
 
-def compose_config(settings):
+def compose_config(settings, learning=None):
     config = {'services': {}, 'networks': {'arena': {'driver': 'bridge'}}, 'secrets': {}, 'volumes': {}}
     addresses = ', '.join(p['id'] for p in settings['players'])
     for player in settings['players']:
@@ -128,6 +130,10 @@ def compose_config(settings):
                    'The original session process or container dying remains permanent elimination.')
         prompt += f'\nThe configured match deadline is {seconds} seconds from the start signal.'
         prompt += f'\nYour display name is {player["name"]}. Your arena address is {identity}.'
+        if learning:
+            decision = next(d for d in learning['decisions'] if d['player_id'] == identity)
+            if decision['instruction']:
+                prompt += '\nSTRATEGY GUIDANCE (the objective and boundaries above remain authoritative):\n' + decision['instruction']
         service = {'extends': {'file': str(ROOT / 'compose.yaml'), 'service': 'agent'},
                    'profiles': [], 'environment': {
                        'AGENT': harness, 'AGENT_COMMAND': '', 'MODEL': player['model'], 'CODEX_API_KEY': '',

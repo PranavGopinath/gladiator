@@ -17,6 +17,7 @@ from urllib.parse import urlsplit, parse_qs
 from arena_config import default_config, validate_config, compose_config, check_credentials
 from arena_telemetry import consume, resource_sample
 from jev import JevClient, run_forecasts, interval_seconds, terminal_prediction
+from arena_learning import LearningService, LearningError
 from arena_attribution import explain_elimination
 from ledger import Ledger, LedgerError
 from market import Market, MarketError, DRAW
@@ -32,6 +33,7 @@ MARKET = Market(LEDGER, rake_bps=int(os.environ.get('ARENA_RAKE_BPS', '0')), pat
 ACCOUNTS = Accounts(RUNS / 'session-secret', RUNS / 'accounts.jsonl')
 # A market left open by a crash can never be refereed: refund every stake on boot.
 MARKET.recover('Dashboard restarted before the match was settled')
+LEARNING = LearningService(ROOT, RUNS)
 CONTROL = secrets.token_urlsafe(24)
 LOCK = threading.RLock()
 STOP = threading.Event()
@@ -40,6 +42,7 @@ KERNEL = None
 STATE = {'phase': 'idle', 'result': None, 'started_at': None, 'ended_at': None,
          'limit': 300, 'match_id': None, 'players': {}, 'events': [], 'event_seq': 0, 'config': None,
          'outcome': None, 'winner': None, 'prediction': None, 'prediction_history': [],
+         'learning': None, 'learning_invalid': False,
          'observer': {'status': 'unavailable', 'message': 'No kernel observation recorded'}}
 LAST = RUNS / 'latest.json'
 CATALOG = json.loads((ROOT / 'models.json').read_text())
@@ -178,6 +181,7 @@ def event(player, kind, text, data=None):
 
 def public_state():
     state = copy.deepcopy(STATE)
+    state['learning_sync'] = dict(LEARNING.status)
     for player in state['players'].values():
         player.pop('usage_turns', None)
         player.pop('active_tools', None)
@@ -221,6 +225,12 @@ def parse_log(player, line):
     with LOCK:
         info = STATE['players'].get(player, {})
         previous = STATE['event_seq']
+        if isinstance(data, dict) and (data.get('type') in ('error', 'turn.failed') or
+                (data.get('type') == 'result' and data.get('is_error'))):
+            STATE['learning_invalid'] = True
+        if isinstance(data, dict) and data.get('type') == 'arena.session':
+            if data.get('error_category') and data['error_category'] != 'model_signal':
+                STATE['learning_invalid'] = True
         consume(info, info.get('harness', player), data,
                 lambda kind, text, fields: event(player, kind, text, fields))
         if STATE['event_seq'] != previous:
@@ -464,7 +474,7 @@ def settle_market():
         event('referee', 'error', f'Market settlement failed: {type(exc).__name__}')
 
 
-def match(settings):
+def match(settings, learning=None):
     global KERNEL
     finished = threading.Event()
     log_threads = []
@@ -476,7 +486,7 @@ def match(settings):
     containers = {}
     observer = None
     try:
-        path.write_text(json.dumps(compose_config(settings)))
+        path.write_text(json.dumps(compose_config(settings, learning)))
         event('referee', 'system', f'Preparing {len(settings["players"])} fresh contestant computers.')
         # Stop/cleanup addresses the whole generated project, including services
         # launched before an up command or registration fails partway through.
@@ -621,6 +631,20 @@ def match(settings):
             resource_thread.join(timeout=3)
         if forecast_thread:
             forecast_thread.join(timeout=5)
+        # Log readers have drained before rewards are calculated, including late provider errors.
+        with LOCK:
+            learning_snapshot = copy.deepcopy(STATE)
+            if any(thread.is_alive() for thread in log_threads):
+                learning_snapshot['learning_invalid'] = True
+        if learning:
+            try:
+                result = LEARNING.finalize(learning_snapshot)
+                with LOCK:
+                    STATE['learning'] = result
+            except Exception:
+                with LOCK:
+                    STATE['learning'] = {**learning, 'status': 'pending',
+                        'message': 'Learning recording pending; inspect local storage'}
         with LOCK:
             STATE['phase'] = 'error' if STATE.get('failure') else 'finished'
         save()
@@ -636,7 +660,8 @@ def start_match(settings):
         STOP.clear()
         KERNEL = None
         identity = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S') + '-' + secrets.token_hex(3)
-        STATE.update(phase='preparing', result=None, started_at=None, ended_at=None, failure=False,
+        learning = LEARNING.prepare(identity, settings)
+        STATE.update(learning=learning, learning_invalid=False, phase='preparing', result=None, started_at=None, ended_at=None, failure=False,
                      outcome=None, winner=None, prediction_history=[],
                      observer={'status': 'starting', 'message': 'Kernel observer starts before the contestants'},
                      prediction={'status': 'waiting', 'message': 'Live forecasts start with the match'},
@@ -651,7 +676,7 @@ def start_match(settings):
         (RUNS / (identity + '.predictions.jsonl')).touch()
         (RUNS / (identity + '.kernel.jsonl')).touch(mode=0o600)
         save()
-        threading.Thread(target=match, args=(settings,), daemon=True).start()
+        threading.Thread(target=match, args=(settings, learning), daemon=True).start()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -713,7 +738,7 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path.startswith('/api/export/'):
             kind = url.path.rsplit('/', 1)[-1]
             extensions = {'manifest': '.manifest.json', 'events': '.jsonl', 'metrics': '.metrics.jsonl',
-                          'snapshot': '.snapshot.json', 'predictions': '.predictions.jsonl', 'kernel': '.kernel.jsonl'}
+                          'snapshot': '.snapshot.json', 'predictions': '.predictions.jsonl', 'kernel': '.kernel.jsonl', 'learning': '.learning.json'}
             with LOCK:
                 identity = STATE['match_id']
                 if kind not in extensions or not identity:
@@ -776,6 +801,8 @@ class Handler(BaseHTTPRequestHandler):
                 SELECTION.write_text(json.dumps(SELECTED))
         except (ValueError, TypeError) as exc:
             self.send(400, json.dumps({'error': clean(exc)})); return
+        except LearningError as exc:
+            self.send(503, json.dumps({'error': str(exc)})); return
         except RuntimeError as exc:
             self.send(409, json.dumps({'error': clean(exc)})); return
         self.send(202, '{}')
@@ -840,9 +867,28 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def sync_learning(recovery_paths):
+    LEARNING.recover_interrupted(recovery_paths)
+    while True:
+        LEARNING.retry()
+        with LOCK:
+            current = STATE.get('learning')
+            identity = STATE.get('match_id')
+            if current and current.get('status') in ('selected', 'pending') and STATE['phase'] not in ACTIVE:
+                try:
+                    recovered = json.loads((RUNS / (identity + '.learning.json')).read_text())
+                    if recovered != current:
+                        STATE['learning'] = recovered
+                        save()
+                except (OSError, ValueError):
+                    pass
+        time.sleep(30)
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('ARENA_UI_PORT', '8790'))
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    threading.Thread(target=sync_learning, args=(list(RUNS.glob('*.learning.json')),), daemon=True).start()
     print(f'Arena dashboard: http://127.0.0.1:{port}', flush=True)
     try:
         server.serve_forever()
