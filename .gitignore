@@ -1,0 +1,7 @@
+.env
+.secrets/
+.runs/
+.venv/
+__pycache__/
+*.pyc
+events*.jsonl

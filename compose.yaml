@@ -1,0 +1,29 @@
+name: agent-arena
+services:
+  agent:
+    build: .
+    init: true
+    environment:
+      AGENT: ${AGENT:-demo}
+      AGENT_COMMAND: ${AGENT_COMMAND:-}
+      CODEX_API_KEY: ${CODEX_API_KEY:-}
+      MODEL: ${MODEL:-}
+      TASK: ${TASK:-}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}::8080"
+      - "${BIND_ADDRESS:-127.0.0.1}::8000"
+    networks: [arena]
+    cpus: 1.0
+    mem_limit: 1g
+    pids_limit: 256
+    stop_grace_period: 8s
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/healthz"]
+      interval: 3s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+networks:
+  arena:
+    driver: bridge

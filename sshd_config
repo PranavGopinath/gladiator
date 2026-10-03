@@ -1,0 +1,11 @@
+# Deliberately open contestant-to-contestant access in the local arena.
+Port 22
+ListenAddress 0.0.0.0
+PermitRootLogin yes
+PermitEmptyPasswords yes
+PasswordAuthentication yes
+PubkeyAuthentication yes
+KbdInteractiveAuthentication no
+UsePAM no
+PrintMotd no
+Subsystem sftp internal-sftp

@@ -1,0 +1,37 @@
+# Automatically loaded with compose.yaml. Credentials are local, ignored files.
+services:
+  agent:
+    profiles: [demo]
+  codex:
+    extends:
+      file: compose.yaml
+      service: agent
+    profiles: []
+    environment:
+      AGENT: codex
+      CODEX_API_KEY: ""
+      CODEX_AUTH_FILE: /run/secrets/codex_auth
+      MODEL: ${CODEX_MODEL:-}
+      TASK: ${CODEX_TASK:-Create /workspace/hello.txt containing exactly "Hello from Codex". Use a shell command to verify the content and then finish. Do not read environment variables or credential files.}
+    secrets: [codex_auth]
+    volumes:
+      - codex-home:/root/.codex
+  claude:
+    extends:
+      file: compose.yaml
+      service: agent
+    profiles: []
+    environment:
+      AGENT: claude
+      CODEX_API_KEY: ""
+      ANTHROPIC_API_KEY_FILE: /run/secrets/anthropic_api_key
+      MODEL: ${CLAUDE_MODEL:-sonnet}
+      TASK: ${CLAUDE_TASK:-Create /workspace/hello.txt containing exactly "Hello from Claude Code". Use a shell command to verify the content and then finish. Do not read environment variables or credential files.}
+    secrets: [anthropic_api_key]
+secrets:
+  codex_auth:
+    file: ./.secrets/codex-auth.json
+  anthropic_api_key:
+    file: ./.secrets/anthropic-api-key
+volumes:
+  codex-home:
