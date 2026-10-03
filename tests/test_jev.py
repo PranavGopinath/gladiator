@@ -162,6 +162,32 @@ class JevTests(unittest.TestCase):
         self.assertEqual(len(updates), 1)
         self.assertEqual(updates[0]['status'], 'disabled')
 
+    def test_actions_trigger_early_coalesced_updates_with_quiet_fallback(self):
+        clock = [0.0]
+        calls = []
+        class Finished:
+            def is_set(self):
+                return len(calls) >= 3
+            def wait(self, seconds):
+                clock[0] += seconds
+                if clock[0] > 10:
+                    raise AssertionError('Worker failed to evaluate')
+        def current():
+            state = snapshot()
+            state['events'] = []
+            for seq, when, kind in [(1, 0, 'system'), (2, .5, 'tool'), (3, .75, 'message'), (4, 1, 'tool')]:
+                if clock[0] >= when:
+                    state['events'].append({'seq': seq, 'time': when, 'kind': kind,
+                                            'player': 'agent-1', 'text': 'fixture'})
+            return state
+        class FakeClient:
+            def evaluate(self, state, context):
+                calls.append(clock[0])
+                return parse_response(response(state), state)
+        with patch('jev.time.monotonic', side_effect=lambda: clock[0]):
+            run_forecasts(current, lambda *_: None, Finished(), FakeClient)
+        self.assertEqual(calls, [.5, 1.5, 6.5])
+
     def test_referee_final_and_canceled_outcomes_are_distinct_from_predictions(self):
         state = snapshot(); state.update(outcome='winner', winner='agent-2')
         final = terminal_prediction(state)

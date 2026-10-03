@@ -226,6 +226,17 @@ def terminal_prediction(snapshot):
             'confidence': None, 'factors': {}, 'message': 'Actual result determined by the referee'}
 
 
+def has_new_evidence(snapshot, cursor):
+    """Trigger on contestant observations, never on referee/UI bookkeeping."""
+    for event in snapshot.get('events', []):
+        if event.get('seq', 0) <= cursor or event.get('player') not in snapshot['players']:
+            continue
+        kind = event.get('kind')
+        if kind in ('tool', 'message', 'error'):
+            return True
+    return False
+
+
 def run_forecasts(snapshot_fn, publish, finished, client_factory, interval=5):
     """An independent worker; authentication errors disable scoring, not matches."""
     if finished.is_set():
@@ -236,11 +247,24 @@ def run_forecasts(snapshot_fn, publish, finished, client_factory, interval=5):
         publish({'status': 'disabled', 'message': str(error)}, None)
         return
     ledger, failures, evaluations = EvidenceLedger(), 0, 0
+    last_request = None
     while not finished.is_set():
         snapshot = snapshot_fn()
         if snapshot['phase'] != 'running' or sum(bool(p.get('alive')) for p in snapshot['players'].values()) < 2:
             return
+        # Avoid unsupported opening odds. New actions/results can trigger an
+        # early update, capped at one request every second. Keep periodic
+        # time-aware updates after the first observation, and error backoff below.
+        if not evaluations and not has_new_evidence(snapshot, 0):
+            finished.wait(.25)
+            continue
+        elapsed = time.monotonic() - last_request if last_request is not None else interval
+        if not failures and elapsed < interval and not (
+                elapsed >= 1 and has_new_evidence(snapshot, ledger.cursor)):
+            finished.wait(.25)
+            continue
         context = ledger.context(snapshot)
+        last_request = time.monotonic()
         try:
             result = client.evaluate(snapshot, context)
             evaluations += 1
@@ -258,4 +282,5 @@ def run_forecasts(snapshot_fn, publish, finished, client_factory, interval=5):
             # Do not serialize arbitrary exceptions: they may contain secrets.
             failures += 1
             publish({'status': 'unavailable', 'message': 'Jev evaluation unavailable; retrying with backoff'}, snapshot)
-        finished.wait(min(60, interval * 2 ** min(failures, 4)))
+        if failures:
+            finished.wait(min(60, interval * 2 ** min(failures, 4)))
