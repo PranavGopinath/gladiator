@@ -1,0 +1,11 @@
+{
+  "name": "agent-arena", "version": "0.1.0", "private": true, "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "dev": "tsx src/coordinator.ts", "build": "tsc", "start": "node dist/coordinator.js",
+    "test": "tsx --test tests/*.test.ts", "check": "tsc --noEmit",
+    "docker:build": "npm run build && docker compose -f docker/compose.yml build",
+    "smoke": "tsx scripts/smoke.ts"
+  },
+  "devDependencies": { "@types/node": "^20.19.0", "tsx": "^4.20.0", "typescript": "^5.9.0" }
+}

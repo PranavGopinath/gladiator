@@ -1,7 +1,21 @@
+# Secrets and local state
 .env
+.env.*
+!.env.example
 .secrets/
 .runs/
+.runtime/
+runs/
+events*.jsonl
+
+# Python
 .venv/
 __pycache__/
 *.pyc
-events*.jsonl
+
+# Node / TypeScript
+node_modules/
+dist/
+
+# macOS
+.DS_Store

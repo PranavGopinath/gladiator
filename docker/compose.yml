@@ -1,0 +1,81 @@
+name: agent-arena
+x-lockdown: &lockdown
+  user: "1000:1000"
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  restart: "no"
+  pids_limit: 128
+services:
+  gateway:
+    <<: *lockdown
+    image: agent-arena-gateway:local
+    build: {context: .., dockerfile: docker/gateway/Dockerfile}
+    cpus: 1
+    mem_limit: 512m
+    networks: [player-a, player-b, egress]
+    ports: ["127.0.0.1:${GATEWAY_PORT:-0}:7071"]
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes: ["${MATCH_DIR:-../.runtime/build}:/run/arena:ro"]
+    tmpfs: [/tmp]
+  target-a:
+    <<: *lockdown
+    image: agent-arena-target:local
+    build: {context: .., dockerfile: docker/target/Dockerfile}
+    cpus: 0.5
+    mem_limit: 512m
+    networks: [player-a]
+    volumes: ["source-a:/app", "${MATCH_DIR:-../.runtime/build}/a-flag:/run/secrets/flag:ro", "${MATCH_DIR:-../.runtime/build}/a-app-token:/run/secrets/app_token:ro"]
+    tmpfs: [/tmp]
+  target-b:
+    <<: *lockdown
+    image: agent-arena-target:local
+    build: {context: .., dockerfile: docker/target/Dockerfile}
+    cpus: 0.5
+    mem_limit: 512m
+    networks: [player-b]
+    volumes: ["source-b:/app", "${MATCH_DIR:-../.runtime/build}/b-flag:/run/secrets/flag:ro", "${MATCH_DIR:-../.runtime/build}/b-app-token:/run/secrets/app_token:ro"]
+    tmpfs: [/tmp]
+  agent-a:
+    <<: *lockdown
+    image: agent-arena-agent:local
+    build: {context: .., dockerfile: docker/agent/Dockerfile}
+    cpus: 1
+    mem_limit: 2g
+    networks: [player-a]
+    environment:
+      HOME: /home/node
+      CODEX_HOME: /home/node/.codex
+      ARENA_TOKEN: ${A_TOKEN:-build}
+      ANTHROPIC_AUTH_TOKEN: ${A_TOKEN:-build}
+      ANTHROPIC_BASE_URL: http://gateway:7070/anthropic
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1"
+    volumes: ["source-a:/app"]
+    tmpfs: ["/tmp:uid=1000,gid=1000", "/home/node:uid=1000,gid=1000"]
+  agent-b:
+    <<: *lockdown
+    image: agent-arena-agent:local
+    build: {context: .., dockerfile: docker/agent/Dockerfile}
+    cpus: 1
+    mem_limit: 2g
+    networks: [player-b]
+    environment:
+      HOME: /home/node
+      CODEX_HOME: /home/node/.codex
+      ARENA_TOKEN: ${B_TOKEN:-build}
+      ANTHROPIC_AUTH_TOKEN: ${B_TOKEN:-build}
+      ANTHROPIC_BASE_URL: http://gateway:7070/anthropic
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1"
+    volumes: ["source-b:/app"]
+    tmpfs: ["/tmp:uid=1000,gid=1000", "/home/node:uid=1000,gid=1000"]
+networks:
+  player-a: {internal: true}
+  player-b: {internal: true}
+  egress: {}
+volumes:
+  source-a: {}
+  source-b: {}
