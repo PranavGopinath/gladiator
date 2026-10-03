@@ -18,6 +18,7 @@ from arena_config import default_config, validate_config, compose_config, check_
 from arena_telemetry import consume, resource_sample
 from jev import JevClient, run_forecasts, interval_seconds, terminal_prediction
 from arena_learning import LearningService, LearningError
+from arena_experiments import ExperimentService
 from arena_attribution import explain_elimination
 from ledger import Ledger, LedgerError
 from market import Market, MarketError, DRAW
@@ -34,6 +35,7 @@ ACCOUNTS = Accounts(RUNS / 'session-secret', RUNS / 'accounts.jsonl')
 # A market left open by a crash can never be refereed: refund every stake on boot.
 MARKET.recover('Dashboard restarted before the match was settled')
 LEARNING = LearningService(ROOT, RUNS)
+EXPERIMENTS = ExperimentService(ROOT, RUNS)
 CONTROL = secrets.token_urlsafe(24)
 LOCK = threading.RLock()
 STOP = threading.Event()
@@ -42,7 +44,7 @@ KERNEL = None
 STATE = {'phase': 'idle', 'result': None, 'started_at': None, 'ended_at': None,
          'limit': 300, 'match_id': None, 'players': {}, 'events': [], 'event_seq': 0, 'config': None,
          'outcome': None, 'winner': None, 'prediction': None, 'prediction_history': [],
-         'learning': None, 'learning_invalid': False,
+         'learning': None, 'learning_invalid': False, 'experiment': None,
          'observer': {'status': 'unavailable', 'message': 'No kernel observation recorded'}}
 LAST = RUNS / 'latest.json'
 CATALOG = json.loads((ROOT / 'models.json').read_text())
@@ -474,7 +476,7 @@ def settle_market():
         event('referee', 'error', f'Market settlement failed: {type(exc).__name__}')
 
 
-def match(settings, learning=None):
+def match(settings, learning=None, experiment=None):
     global KERNEL
     finished = threading.Event()
     log_threads = []
@@ -554,8 +556,11 @@ def match(settings, learning=None):
             STATE.update(phase='running', started_at=start)
             for info in STATE['players'].values():
                 info['state'] = 'standing'
-        MARKET.open(STATE['match_id'], list(STATE['players']))
-        event('referee', 'market', 'Betting market open: in-play pari-mutuel, Jev-priced, referee-settled.')
+        if not experiment:
+            MARKET.open(STATE['match_id'], list(STATE['players']))
+            event('referee', 'market', 'Betting market open: in-play pari-mutuel, Jev-priced, referee-settled.')
+        else:
+            event('referee', 'experiment', 'Experiment match: betting disabled; ' + experiment['arm'])
         resource_thread = threading.Thread(target=sample_resources, args=(containers, finished, STATE['match_id']), daemon=True)
         resource_thread.start()
         event('referee', 'start', 'All original sessions registered. Common start scheduled. No preparation phase.')
@@ -617,7 +622,8 @@ def match(settings, learning=None):
             # Recording failure must never prevent contestant cleanup.
             with LOCK:
                 STATE['prediction'] = terminal_prediction(STATE)
-        settle_market()
+        if not experiment:
+            settle_market()
         try:
             cleanup = command(*compose, 'stop', '-t', '2', timeout=20, check=False)
             if cleanup.returncode:
@@ -638,7 +644,7 @@ def match(settings, learning=None):
                 learning_snapshot['learning_invalid'] = True
         if learning:
             try:
-                result = LEARNING.finalize(learning_snapshot)
+                result = EXPERIMENTS.finalize(learning_snapshot) if experiment else LEARNING.finalize(learning_snapshot)
                 with LOCK:
                     STATE['learning'] = result
             except Exception:
@@ -650,7 +656,7 @@ def match(settings, learning=None):
         save()
 
 
-def start_match(settings):
+def start_match(settings, experiment=False):
     global KERNEL
     settings = validate_config(settings)
     check_credentials(settings)
@@ -660,8 +666,14 @@ def start_match(settings):
         STOP.clear()
         KERNEL = None
         identity = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S') + '-' + secrets.token_hex(3)
-        learning = LEARNING.prepare(identity, settings)
-        STATE.update(learning=learning, learning_invalid=False, phase='preparing', result=None, started_at=None, ended_at=None, failure=False,
+        if experiment:
+            settings, learning, experiment_info = EXPERIMENTS.prepare(identity)
+        else:
+            EXPERIMENTS.ready()
+            if EXPERIMENTS.current and EXPERIMENTS.current['phase'] in ('training', 'evaluation'):
+                raise ValueError('End the active experiment before starting an ordinary match')
+            learning, experiment_info = LEARNING.prepare(identity, settings), None
+        STATE.update(experiment=experiment_info, learning=learning, learning_invalid=False, phase='preparing', result=None, started_at=None, ended_at=None, failure=False,
                      outcome=None, winner=None, prediction_history=[],
                      observer={'status': 'starting', 'message': 'Kernel observer starts before the contestants'},
                      prediction={'status': 'waiting', 'message': 'Live forecasts start with the match'},
@@ -670,13 +682,21 @@ def start_match(settings):
                         'alive': False, 'state': 'starting', 'activity': 'starting', 'container': 'pending',
                         'health': 'unknown', 'turn': 0, 'tool_count': 0, 'death_at': None,
                         'usage': None, 'cost_usd': None, 'resources': None} for p in settings['players']})
-        (RUNS / (identity + '.manifest.json')).write_text(json.dumps(sanitized(settings), indent=2))
-        (RUNS / (identity + '.jsonl')).touch()
-        (RUNS / (identity + '.metrics.jsonl')).touch()
-        (RUNS / (identity + '.predictions.jsonl')).touch()
-        (RUNS / (identity + '.kernel.jsonl')).touch(mode=0o600)
-        save()
-        threading.Thread(target=match, args=(settings, learning), daemon=True).start()
+        try:
+            (RUNS / (identity + '.manifest.json')).write_text(json.dumps(sanitized(settings), indent=2))
+            (RUNS / (identity + '.jsonl')).touch()
+            (RUNS / (identity + '.metrics.jsonl')).touch()
+            (RUNS / (identity + '.predictions.jsonl')).touch()
+            (RUNS / (identity + '.kernel.jsonl')).touch(mode=0o600)
+            save()
+            threading.Thread(target=match, args=(settings, learning, experiment_info), daemon=True).start()
+        except Exception:
+            STATE.update(phase='error', outcome='interrupted', failure=True)
+            if experiment_info:
+                EXPERIMENTS.finalize(copy.deepcopy(STATE))
+            elif learning:
+                LEARNING.finalize(copy.deepcopy(STATE))
+            raise
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -715,6 +735,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, (ROOT / 'dashboard.html').read_text().replace('__CONTROL__', CONTROL), 'text/html; charset=utf-8')
         elif url.path in ('/dashboard.js', '/dashboard.css'):
             self.send(200, (ROOT / url.path[1:]).read_text(), 'text/javascript' if url.path.endswith('.js') else 'text/css')
+        elif url.path == '/api/experiments':
+            self.send(200, json.dumps(sanitized(EXPERIMENTS.view())))
+        elif url.path == '/api/experiments/report':
+            self.send(200, json.dumps(sanitized(EXPERIMENTS.view())), filename='experiment-report.json')
+        elif url.path == '/api/experiments/recording':
+            query = parse_qs(url.query)
+            identity = query.get('match_id', [''])[0]
+            experiment = EXPERIMENTS.view().get('experiment') or {}
+            known = {r['id'] for r in experiment.get('report', {}).get('runs', [])}
+            if identity not in known or not re.fullmatch(r'[A-Za-z0-9-]+', identity):
+                self.send(404, '{}'); return
+            path = RUNS / (identity + '.jsonl')
+            if not path.is_file():
+                self.send(404, '{}'); return
+            self.send(200, path.read_bytes(), 'application/x-ndjson', path.name)
         elif url.path == '/api/config':
             with LOCK:
                 self.send(200, json.dumps(sanitized(STATE.get('config') or default_config())))
@@ -777,6 +812,10 @@ class Handler(BaseHTTPRequestHandler):
             if self.headers.get('X-Arena-Control') != CONTROL:
                 self.send(403, '{"error":"Invalid control token"}'); return
             self.operator_action()
+        elif self.path.startswith('/api/experiments/'):
+            if self.headers.get('X-Arena-Control') != CONTROL:
+                self.send(403, '{"error":"Invalid control token"}'); return
+            self.experiment_action()
         elif self.path == '/api/bet':
             self.place_bet()
         elif self.path == '/api/checkout':
@@ -785,6 +824,37 @@ class Handler(BaseHTTPRequestHandler):
             self.stripe_webhook()
         else:
             self.send(404, '{}')
+
+    def experiment_action(self):
+        try:
+            body = self.json_body(128000)
+            action = self.path.rsplit('/', 1)[-1]
+            with LOCK:
+                if action == 'checkpoints':
+                    self.send(200, json.dumps(EXPERIMENTS.checkpoints(body.get('config', {})))); return
+                if STATE['phase'] in ACTIVE:
+                    raise ValueError('Stop or finish the current match first')
+                if action == 'create':
+                    EXPERIMENTS.create(body.get('config', {}), body.get('learner'), body.get('checkpoint_id'))
+                elif action == 'load':
+                    EXPERIMENTS.load(body.get('id', ''))
+                elif action == 'freeze':
+                    EXPERIMENTS.freeze()
+                elif action == 'end':
+                    EXPERIMENTS.end()
+                elif action == 'next':
+                    if not EXPERIMENTS.current:
+                        raise ValueError('Create or load an experiment first')
+                    start_match(EXPERIMENTS.current['config'], experiment=True)
+                else:
+                    self.send(404, '{}'); return
+            self.send(200, json.dumps(sanitized(EXPERIMENTS.view())))
+        except LearningError as exc:
+            self.send(503, json.dumps({'error': str(exc)}))
+        except (ValueError, TypeError, AttributeError) as exc:
+            self.send(400, json.dumps({'error': clean(exc)}))
+        except RuntimeError as exc:
+            self.send(409, json.dumps({'error': clean(exc)}))
 
     def operator_action(self):
         if self.path == '/api/stop':
@@ -869,8 +939,13 @@ class Handler(BaseHTTPRequestHandler):
 
 def sync_learning(recovery_paths):
     LEARNING.recover_interrupted(recovery_paths)
+    try:
+        EXPERIMENTS.recover()
+    except LearningError:
+        pass
     while True:
         LEARNING.retry()
+        EXPERIMENTS.retry()
         with LOCK:
             current = STATE.get('learning')
             identity = STATE.get('match_id')

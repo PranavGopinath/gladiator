@@ -4,7 +4,7 @@ import math
 import os
 from pathlib import Path
 import re
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 ROOT = Path(__file__).resolve().parent
 
@@ -41,6 +41,29 @@ def validate_base_url(value):
     if not valid:
         raise ValueError('Compatible API base_url must be an http or https URL without credentials, query, or fragment')
     return value.rstrip('/')
+
+
+def model_identity(player):
+    endpoint = player.get('base_url')
+    if endpoint:
+        parsed = urlsplit(endpoint)
+        port = parsed.port
+        host = parsed.hostname.lower()
+        if ':' in host:
+            host = '[' + host + ']'
+        authority = host + (':' + str(port) if port and (parsed.scheme, port) not in (('http', 80), ('https', 443)) else '')
+        endpoint = urlunsplit((parsed.scheme.lower(), authority, parsed.path.rstrip('/'), '', ''))
+    return player['harness'], player.get('model', ''), endpoint
+
+
+def validate_learning_roster(settings, experiment=False):
+    players = settings['players']
+    if experiment and len(players) != 2:
+        raise ValueError('Experiments require exactly two contestants')
+    if experiment and any(not p.get('model') for p in players):
+        raise ValueError('Experiments require explicit model IDs')
+    if len({model_identity(p) for p in players}) != 1:
+        raise ValueError('Learning requires the same harness, model, and compatible endpoint for every contestant')
 
 
 def local_endpoint(base_url):
@@ -105,6 +128,8 @@ def validate_config(value):
     if len({p['name'].casefold() for p in normalized}) != len(normalized):
         raise ValueError('Give each contestant a different name')
     settings['players'] = normalized
+    if settings['learning_enabled']:
+        validate_learning_roster(settings)
     return settings
 
 

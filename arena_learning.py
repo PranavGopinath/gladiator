@@ -30,6 +30,9 @@ STRATEGIES = {
     'verification_first': {'label': 'Verification first', 'instruction':
         'Prioritize verifying observable effects after each consequential action. '
         'Distinguish an attempted action from a confirmed result and revise your plan when verification fails.'},
+    'attack_first': {'label': 'Attack first', 'instruction':
+        'Prioritize attacking the opponent\'s session and service availability before other moves. '
+        'Verify the effect of changes and adapt when new evidence warrants a different priority.'},
 }
 
 
@@ -69,6 +72,8 @@ def policy_state(history):
     pooled, contexts = {}, {}
     for row in history[:WINDOW]:
         for decision in row['payload']['decisions']:
+            if decision.get('learnable') is False:
+                continue
             reward = row['rewards'].get(decision['player_id'])
             if reward is None:
                 continue
@@ -85,13 +90,15 @@ def policy_state(history):
 
 def distribution(state, context):
     scores = {}
+    prior_count = state.get('prior_count', PRIOR_COUNT)
+    epsilon = state.get('epsilon', EPSILON)
     for strategy in STRATEGIES:
         shared = state['pooled'].get(strategy, {'count': 0, 'total': 0})
         prior = shared['total'] / shared['count'] if shared['count'] else .5
         specific = state['contexts'].get(digest(context), {}).get(strategy, {'count': 0, 'total': 0})
-        scores[strategy] = (specific['total'] + PRIOR_COUNT * prior) / (specific['count'] + PRIOR_COUNT)
+        scores[strategy] = (specific['total'] + prior_count * prior) / (specific['count'] + prior_count)
     best = [s for s, score in scores.items() if math.isclose(score, max(scores.values()), abs_tol=1e-12)]
-    return {s: EPSILON / len(STRATEGIES) + ((1 - EPSILON) / len(best) if s in best else 0)
+    return {s: epsilon / len(STRATEGIES) + ((1 - epsilon) / len(best) if s in best else 0)
             for s in STRATEGIES}, scores
 
 
@@ -289,6 +296,8 @@ class LearningService:
         for path in (list(self.runs.glob('*.learning.json')) if paths is None else paths):
             try:
                 saved = json.loads(path.read_text())
+                if saved.get('experiment_id'):
+                    continue
                 if (self.runs / 'learning-outbox' / path.name.replace('.learning.json', '.json')).exists():
                     continue  # A durable outcome takes precedence over an older local snapshot.
                 if saved.get('status') == 'selected':

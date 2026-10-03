@@ -17,7 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def config():
-    return validate_config({'learning_enabled': True})
+    settings = default_config()
+    settings['players'][1].update(harness=settings['players'][0]['harness'], model=settings['players'][0]['model'])
+    return validate_config({**settings, 'learning_enabled': True})
 
 
 def history_row(identity='past', strategy='defense_first', reward=1, settings=None):
@@ -53,8 +55,8 @@ class ControllerTests(unittest.TestCase):
         selected = learning.choose(config(), [], random.Random(5))
         self.assertEqual(len(selected['decisions']), 2)
         for decision in selected['decisions']:
-            self.assertEqual(set(decision['distribution'].values()), {.25})
-            self.assertEqual(decision['selection_probability'], .25)
+            self.assertEqual(set(decision['distribution'].values()), {1 / len(learning.STRATEGIES)})
+            self.assertEqual(decision['selection_probability'], 1 / len(learning.STRATEGIES))
             self.assertEqual(decision['controller_version'], selected['controller_version'])
 
     def test_reward_updates_context_and_shared_prior_without_starving_exploration(self):
@@ -62,15 +64,15 @@ class ControllerTests(unittest.TestCase):
         state = learning.policy_state([history_row()])
         for player in settings['players']:
             probabilities, scores = learning.distribution(state, learning.context_for(settings, player))
-            self.assertAlmostEqual(probabilities['defense_first'], .85)
+            self.assertAlmostEqual(probabilities['defense_first'], 1 - learning.EPSILON + learning.EPSILON / len(learning.STRATEGIES))
             self.assertAlmostEqual(sum(probabilities.values()), 1)
-            self.assertTrue(all(p >= .05 for p in probabilities.values()))
+            self.assertTrue(all(p >= learning.EPSILON / len(learning.STRATEGIES) for p in probabilities.values()))
             self.assertEqual(scores['defense_first'], 1)
 
     def test_losses_and_ties_break_evenly(self):
         state = learning.policy_state([history_row(strategy='baseline', reward=.1)])
         probs, _ = learning.distribution(state, learning.context_for(config(), config()['players'][0]))
-        self.assertAlmostEqual(probs['baseline'], .05)
+        self.assertAlmostEqual(probs['baseline'], learning.EPSILON / len(learning.STRATEGIES))
         self.assertAlmostEqual(probs['defense_first'], probs['verification_first'])
 
     def test_whole_match_window_and_context_identity(self):

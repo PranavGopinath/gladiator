@@ -40,3 +40,8 @@ test('scored, skipped, and pending outcomes are explicit', () => {
     assert.match(dom['learning-status'].textContent, status==='scored'?/Controller updated/:status==='skipped'?/Provider failure/:/Synchronization pending/);
   }
 });
+test('evaluation never claims the controller updated', () => {
+  const dom = setup({players:{},learning:{status:'scored',evaluation_only:true,decisions:[{...decision,role:'fixed opponent'}]}});
+  assert.match(dom['learning-status'].textContent, /Controller unchanged/);
+  assert.match(dom['learning-decisions'].children[0].children[0].textContent, /fixed opponent/);
+});
