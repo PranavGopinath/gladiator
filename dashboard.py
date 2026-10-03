@@ -266,7 +266,7 @@ def forecast_match(finished, identity):
                 STATE['prediction'] = sanitized(update)
                 STATE['prediction_history'].append({field: update[field] for field in
                     ('updated_at', 'as_of', 'probabilities', 'confidence', 'event_seq')})
-                STATE['prediction_history'] = STATE['prediction_history'][-120:]
+                STATE['prediction_history'] = STATE['prediction_history'][-3601:]
             else:
                 STATE['prediction'] = {**(STATE.get('prediction') or {}), **update}
             with (RUNS / (identity + '.predictions.jsonl')).open('a') as output:
