@@ -1,0 +1,71 @@
+// Namespace expressions are replaced from registered container identities.
+BEGIN { printf("READY ts=%llu\n", nsecs); }
+interval:s:1 { printf("HEARTBEAT ts=%llu\n", nsecs); }
+
+kfunc:wake_up_new_task
+{
+ $p=(struct task_struct *)curtask;
+ $c=args->p;
+ $ns=$p->nsproxy->pid_ns_for_children->ns.inum;
+ if (__NAMESPACE_FILTER__) {
+  printf("FORK ts=%llu parent=%d parent_start=%llu child=%d child_start=%llu namespace=%u cgroup=%llu parent_group=%d parent_group_start=%llu child_group=%d child_group_start=%llu\n", nsecs,$p->pid,$p->start_boottime,$c->pid,$c->start_boottime,$ns,cgroup,$p->tgid,$p->group_leader->start_boottime,$c->tgid,$c->group_leader->start_boottime);
+ }
+}
+
+kprobe:tcp_recvmsg
+{
+ $t=(struct task_struct *)curtask;
+ $ns=$t->nsproxy->pid_ns_for_children->ns.inum;
+ $s=(struct sock *)arg0;
+ if ((__NAMESPACE_FILTER__) && $s->__sk_common.skc_family == 2 && $s->__sk_common.skc_num == 22 && !@seen[tid,$t->start_boottime]) {
+  @seen[tid,$t->start_boottime]=1;
+  printf("SSH_RECV ts=%llu pid=%d start=%llu parent=%d parent_start=%llu namespace=%u cgroup=%llu remote=%s remote_port_net=%u local=%s local_port=%u pid_group=%d start_group=%llu\n",nsecs,tid,$t->start_boottime,$t->real_parent->pid,$t->real_parent->start_boottime,$ns,cgroup,ntop($s->__sk_common.skc_daddr),$s->__sk_common.skc_dport,ntop($s->__sk_common.skc_rcv_saddr),$s->__sk_common.skc_num,$t->tgid,$t->group_leader->start_boottime);
+ }
+}
+
+kfunc:__send_signal_locked
+{
+ $t=(struct task_struct *)curtask;
+ $v=args->t;
+ $ns=$v->nsproxy->pid_ns_for_children->ns.inum;
+ $info=(uint64)args->info;
+ $code=0;
+ $kernel=0;
+ if ($info == 1 || $info == 2) { $kernel=1; }
+ if ($info > 2) {
+  $code=args->info->si_code;
+  if ($code == 128) { $kernel=1; }
+ }
+ if ((__NAMESPACE_FILTER__) && (args->sig == 9 || args->sig == 15)) {
+  printf("SIGNAL ts=%llu sender=%d sender_start=%llu sender_parent=%d sender_parent_start=%llu target=%d target_start=%llu signal=%d cgroup=%llu namespace=%u sender_namespace=%u target_namespace=%u sender_group=%d sender_group_start=%llu target_group=%d target_group_start=%llu kernel_generated=%d signal_code=%d\n",nsecs,tid,$t->start_boottime,$t->real_parent->pid,$t->real_parent->start_boottime,$v->pid,$v->start_boottime,args->sig,cgroup,$ns,$t->nsproxy->pid_ns_for_children->ns.inum,$ns,$t->tgid,$t->group_leader->start_boottime,$v->tgid,$v->group_leader->start_boottime,$kernel,$code);
+ }
+}
+
+tracepoint:sched:sched_process_exit
+{
+ $t=(struct task_struct *)curtask;
+ $ns=$t->nsproxy->pid_ns_for_children->ns.inum;
+ if (__NAMESPACE_FILTER__) {
+  printf("EXIT ts=%llu pid=%d start=%llu parent=%d parent_start=%llu namespace=%u exit_code=%d group_exit_code=%d cgroup=%llu pid_group=%d start_group=%llu\n",nsecs,tid,$t->start_boottime,$t->real_parent->pid,$t->real_parent->start_boottime,$ns,$t->exit_code,$t->signal->group_exit_code,cgroup,$t->tgid,$t->group_leader->start_boottime);
+ }
+ delete(@seen[tid,$t->start_boottime]);
+ delete(@connect[tid]);
+}
+
+kprobe:tcp_v4_connect
+{
+ $t=(struct task_struct *)curtask;
+ $ns=$t->nsproxy->pid_ns_for_children->ns.inum;
+ if (__NAMESPACE_FILTER__) { @connect[tid]=arg0; }
+}
+
+kretprobe:tcp_v4_connect
+/@connect[tid]/
+{
+ $t=(struct task_struct *)curtask;
+ $s=(struct sock *)@connect[tid];
+ printf("CONNECT ts=%llu pid=%d start=%llu parent=%d parent_start=%llu namespace=%u cgroup=%llu local=%s local_port=%u remote=%s remote_port_net=%u result=%d pid_group=%d start_group=%llu\n",nsecs,tid,$t->start_boottime,$t->real_parent->pid,$t->real_parent->start_boottime,$t->nsproxy->pid_ns_for_children->ns.inum,cgroup,ntop($s->__sk_common.skc_rcv_saddr),$s->__sk_common.skc_num,ntop($s->__sk_common.skc_daddr),$s->__sk_common.skc_dport,retval,$t->tgid,$t->group_leader->start_boottime);
+ delete(@connect[tid]);
+}
+
+END { clear(@seen); clear(@connect); }

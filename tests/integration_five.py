@@ -90,7 +90,7 @@ def run(timeout, turn_error=False):
                  patch.object(dashboard, 'match', tracked_match), patch.object(dashboard, 'command', bounded_command), \
                  patch.object(dashboard, 'compose_config', credential_free_compose), \
                  patch.object(dashboard, 'credential_values', return_value=()), \
-                 patch.dict(os.environ, {'JEV_ENABLED': '0'}):
+                 patch.dict(os.environ, {'JEV_ENABLED': '0', 'ARENA_OBSERVER': '0'}):
                 killed = False
                 try:
                     dashboard.start_match({'duration_seconds': 60, 'turn_interval_seconds': 2,

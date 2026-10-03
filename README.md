@@ -174,6 +174,38 @@ contestant-controlled evidence, not a trusted signal audit. Unknown or ambiguous
 attackers stay unknown. Late command results can add an attribution update without
 changing the observed death or reviving a contestant.
 
+### Kernel kill attribution
+
+Dashboard matches start a separate eBPF observer before opening the contestant
+start gates. It runs in Docker Desktop's existing Linux VM; no additional VM is
+needed. The first match builds a cached `agent-arena-kernel-observer:local` image.
+Only the observer gets privileged mode and host PID access. It has no network,
+Docker socket, host bind mounts, or provider credentials.
+
+A **confirmed** attacker requires a complete IPv4 SSH connection → remote process
+ancestry → fatal signal → matching process exit chain. Process start times, kernel
+boot ID, and match epoch prevent PID reuse from identifying the wrong victim.
+The external referee still decides whether a contestant died. Ignored signals and
+normal exits do not establish a kill. Indirect attacks, ambiguous senders, and
+unobserved paths remain probable or unknown.
+
+The UI shows observer health and an expandable kernel evidence chain. Trace loss
+or observer failure disables confirmation; log-based attribution remains available.
+Confirmed reports are withdrawn if the match's trace coverage is later lost.
+Recordings live in `.runs/<match-id>.kernel.jsonl`; the dashboard offers a kernel
+export. Raw observer diagnostics are in `.runs/<match-id>.observer/`.
+
+To run without the privileged observer, launch the dashboard with
+`ARENA_OBSERVER=0 python3 dashboard.py`. Unsupported kernels fall back automatically.
+
+Opt-in Docker integration checks use disposable fixtures and a local fake model
+endpoint, with no paid model calls or provider credentials:
+
+```sh
+python3 tests/integration_kernel.py
+python3 tests/integration_kernel_match.py
+```
+
 The default prompt frames the task as a game with a sole-survivor win
 condition. Every turn offers ATTACK or DEFEND, asks for a concrete tool action
 and an observed result, and permits either strategy. Follow-ups include elapsed

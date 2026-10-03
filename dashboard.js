@@ -93,6 +93,54 @@ function showEvidence(seq) {
   const target = row.player === selected ? $('terminal-feed').querySelector(`[data-seq="${seq}"]`) : $('play-feed').querySelector(`[data-seq="${seq}"]`);
   if (target) { target.scrollIntoView({block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'}); target.tabIndex = -1; target.focus({preventScroll: true}); }
 }
+function kernelEvidence(elimination) {
+  return Array.isArray(elimination?.kernel_evidence) ? elimination.kernel_evidence.filter(event => event && typeof event === 'object' && typeof (event.type || event.kind) === 'string').map(event => ({...event, type: event.type || event.kind})) : [];
+}
+function eliminationConfidence(elimination) {
+  const trace = kernelEvidence(elimination);
+  if (elimination?.confidence === 'confirmed' && trace.some(event => event.type === 'SIGNAL') && trace.some(event => event.type === 'EXIT')) return 'confirmed';
+  return elimination?.confidence === 'probable' ? 'probable' : 'unknown';
+}
+function renderKernelObserver() {
+  const observer = latest?.observer || {}, status = observer.status || 'unavailable';
+  const labels = {disabled: 'Off', starting: 'Starting', ready: 'Live', unavailable: 'Unavailable', degraded: 'Degraded', stopped: observer.previous_status === 'ready' ? 'Off · recorded' : observer.previous_status === 'degraded' ? 'Off · degraded' : 'Off'};
+  const display = connected ? status : 'unavailable';
+  $('kernel-status').textContent = connected ? labels[status] || 'Unavailable' : 'Unavailable';
+  $('kernel-status').className = `kernel-status ${display}`;
+  const defaults = {disabled: 'Kernel observation is disabled for this match.', starting: 'The kernel observer is starting. Evidence is not yet available.', ready: 'Recording kernel connections, process ancestry, signals, and exits.', unavailable: 'No kernel observation is available for this match. Attacker attribution may rely on recorded activity.', degraded: 'Kernel observation has gaps. Incomplete evidence cannot confirm attacker attribution.', stopped: 'Kernel recording has stopped. Evidence recorded during the match remains available.'};
+  $('kernel-message').textContent = connected ? observer.message || defaults[status] || defaults.unavailable : 'The referee connection was lost. Kernel observer status cannot be verified.';
+  const parts = [];
+  const losses = observer.loss_count ?? observer.dropped_events;
+  if (Number.isFinite(losses)) parts.push(`Dropped events: ${losses}`);
+  if (observer.boot_id) parts.push(`Boot: ${observer.boot_id}`);
+  $('kernel-meta').textContent = parts.join(' · '); $('kernel-meta').hidden = !parts.length;
+}
+function kernelEvidenceDetails(elimination) {
+  const trace = kernelEvidence(elimination);
+  if (!trace.length) return null;
+  const detail = node('details', null, 'kernel-evidence');
+  detail.append(node('summary', `Kernel evidence chain · ${trace.length} events`));
+  const list = node('ol', null, 'kernel-chain');
+  const labels = {CONNECT: 'Source connection', SSH_RECV: 'Remote SSH session', FORK: 'Process ancestry', SIGNAL: 'Signal sent', EXIT: 'Process exit'};
+  const names = {id: 'Evidence ID', ts: 'Monotonic time (ns)', pid: 'Host PID', start: 'Process start (ns)', parent: 'Parent host PID', parent_start: 'Parent start (ns)', child: 'Child host PID', child_start: 'Child start (ns)', sender: 'Sender host PID', sender_start: 'Sender start (ns)', sender_parent: 'Sender parent PID', target: 'Target host PID', target_start: 'Target start (ns)', cgroup: 'Cgroup', ns: 'PID namespace', namespace: 'PID namespace', exit_code: 'Raw exit status', group_exit_code: 'Raw group exit status', signal: 'Signal', contestant: 'Contestant'};
+  trace.slice().sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0)).forEach(event => {
+    const item = node('li'), title = node('strong', labels[event.type] || event.type);
+    item.append(title);
+    const contestant = playersForView().find(player => player.id === event.contestant);
+    if (contestant) item.append(node('p', `Contender: ${contestant.name}`, 'kernel-chain-context'));
+    if (event.local && event.remote) item.append(node('p', `${event.local}:${event.local_port ?? '?'} ${event.type === 'SSH_RECV' ? '←' : '→'} ${event.remote}:${event.remote_port ?? '?'}`, 'kernel-chain-context mono'));
+    if (event.type === 'SIGNAL' && event.signal != null) item.append(node('p', `Signal ${event.signal}${({9: ' · SIGKILL', 15: ' · SIGTERM'})[event.signal] || ''}`, 'kernel-chain-context'));
+    const fields = node('dl', null, 'kernel-fields');
+    Object.entries(names).forEach(([key, label]) => {
+      if (event[key] == null || typeof event[key] === 'object') return;
+      fields.append(node('dt', label), node('dd', String(event[key])));
+    });
+    item.append(fields); list.append(item);
+  });
+  detail.append(list);
+  const download = node('a', 'Download kernel recording ↗', 'kernel-download'); download.href = '/api/export/kernel'; download.download = ''; detail.append(download);
+  return detail;
+}
 function renderContestantReport(player) {
   const status = statusOf(player), report = $('contestant-report'), elimination = player.elimination;
   const show = status.kind === 'eliminated' || status.kind === 'turn_error' || status.kind === 'blocked';
@@ -101,17 +149,20 @@ function renderContestantReport(player) {
   if (key !== renderedReport) {
     renderedReport = key; report.replaceChildren(); report.className = `contestant-report ${status.kind}`;
     if (status.kind === 'eliminated') {
-      report.append(node('span', 'ELIMINATION REPORT', 'small-label'), node('strong', elimination?.summary || player.reason || 'The referee observed the contestant session terminate.'));
+      const confidence = eliminationConfidence(elimination);
+      const summary = elimination?.confidence === 'confirmed' && confidence !== 'confirmed' ? 'The contestant session terminated. Kernel evidence is unavailable in this report.' : elimination?.summary || player.reason || 'The referee observed the contestant session terminate.';
+      report.append(node('span', 'ELIMINATION REPORT', 'small-label'), node('strong', summary));
       const details = node('div', null, 'elimination-details');
       if (elimination?.cause) details.append(node('span', `Cause: ${String(elimination.cause).replaceAll('_', ' ')}`));
-      if (elimination?.confidence) details.append(node('span', `Confidence: ${elimination.confidence}`));
+      details.append(node('span', {confirmed: 'Confirmed · kernel evidence', probable: 'Probable · activity correlation', unknown: 'Unknown · attribution unverified'}[confidence], `confidence-badge ${confidence}`));
       report.append(details);
       const attacker = playersForView().find(p => p.id === elimination?.attacker);
       if (attacker) {
         const link = node('button', `Attributed contender: ${attacker.name} / ${providerLabel(attacker.harness)}`, 'attributed-contender');
         link.type = 'button'; link.onclick = () => selectPlayer(attacker.id); report.append(link);
       } else report.append(node('p', 'Attacker: not established', 'attribution-note'));
-      if (elimination?.attacker && elimination.confidence !== 'confirmed') report.append(node('p', 'The process death was observed. Attacker attribution is a correlation with recorded activity.', 'attribution-note'));
+      if (elimination?.attacker && confidence !== 'confirmed') report.append(node('p', 'The process death was observed. Attacker attribution is a correlation with recorded activity.', 'attribution-note'));
+      const kernel = kernelEvidenceDetails(elimination); if (kernel) report.append(kernel);
       if (Array.isArray(elimination?.evidence_seqs) && elimination.evidence_seqs.length) {
         const links = node('div', null, 'evidence-links'); links.append(node('span', 'Recorded evidence:', 'attribution-note'));
         elimination.evidence_seqs.forEach(seq => links.append(evidenceButton(seq))); report.append(links);
@@ -189,7 +240,7 @@ function renderPlayFeed() {
       const attribution = row.data?.elimination || row.data || {};
       const attacker = players.find(p => p.id === attribution.attacker);
       if (attacker) body.append(node('p', `Attributed contender: ${attacker.name} / ${providerLabel(attacker.harness)}`, 'attribution-detail'));
-      if (attribution.confidence) body.append(node('span', `CONFIDENCE: ${String(attribution.confidence).toUpperCase()}`, 'event-kind'));
+      body.append(node('span', `CONFIDENCE: ${eliminationConfidence(attribution).toUpperCase()}`, `event-kind confidence-${eliminationConfidence(attribution)}`));
       if (Array.isArray(attribution.evidence_seqs) && attribution.evidence_seqs.length) {
         const links = node('div', null, 'evidence-links');
         attribution.evidence_seqs.forEach(seq => links.append(evidenceButton(seq))); body.append(links);
@@ -266,7 +317,7 @@ function render() {
   const phase = {idle: 'LOBBY', preparing: 'PREPARING', running: 'LIVE MATCH', finishing: 'FINISHING', finished: 'FINISHED', error: 'INTERRUPTED', interrupted: 'INTERRUPTED'}[state] || state.toUpperCase();
   $('phase').textContent = phase;
   $('phase-dot').classList.toggle('live', state === 'running'); $('arena-live').classList.toggle('live', state === 'running');
-  $('arena-subtitle').textContent = state === 'idle' ? 'AWAITING THE STARTING SIGNAL' : state === 'running' ? 'LIVE · EVERY MOVE OBSERVED' : phase;
+  $('arena-subtitle').textContent = state === 'idle' ? 'AWAITING THE STARTING SIGNAL' : state === 'running' ? 'LIVE · ACTIVITY RECORDED' : phase;
   const standing = Object.keys(latest?.players || {}).length ? players.filter(p => p.alive).length : players.length;
   $('standing').replaceChildren(document.createTextNode(`${standing} `), node('span', `/ ${players.length}`));
   $('result').textContent = latest?.result || ''; $('result').hidden = !latest?.result;
@@ -274,7 +325,7 @@ function render() {
   $('recording').textContent = latest?.match_id ? 'MATCH RECORDED' : 'LOCAL RECORDING'; $('recording').title = latest?.match_id || '';
   const objective = (latest?.config?.prompt || config.prompt || '').split('\n').find(line => line.trim() && !line.trim().startsWith('GAME:'));
   $('objective-label').textContent = /LAST AGENT STANDING/i.test(latest?.config?.prompt || config.prompt) ? 'Last agent standing' : objective || 'Custom objective';
-  tick(); renderArena(); renderObservation(); renderPlayFeed(); renderPrediction(); updateControls();
+  tick(); renderKernelObserver(); renderArena(); renderObservation(); renderPlayFeed(); renderPrediction(); updateControls();
 }
 async function jsonRequest(url, options) {
   const response = await fetch(url, options);
@@ -293,7 +344,7 @@ async function refresh() {
     connected = true; $('connection').textContent = 'Referee connected'; $('connection-dot').parentElement.className = 'connection connected';
     render();
   } catch (error) {
-    connected = false; $('connection').textContent = 'Disconnected · retrying'; $('connection-dot').parentElement.className = 'connection disconnected'; updateControls();
+    connected = false; $('connection').textContent = 'Disconnected · retrying'; $('connection-dot').parentElement.className = 'connection disconnected'; renderKernelObserver(); updateControls();
   }
 }
 function errorMessage(message, target = 'error') { $(target).textContent = message || ''; $(target).hidden = !message; }

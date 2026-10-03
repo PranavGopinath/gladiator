@@ -18,6 +18,7 @@ from arena_config import default_config, validate_config, compose_config, check_
 from arena_telemetry import consume, resource_sample
 from jev import JevClient, run_forecasts, interval_seconds, terminal_prediction
 from arena_attribution import explain_elimination
+from arena_kernel import MatchObserver
 
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / '.runs'
@@ -26,9 +27,11 @@ CONTROL = secrets.token_urlsafe(24)
 LOCK = threading.RLock()
 STOP = threading.Event()
 ACTIVE = ('preparing', 'running', 'finishing')
+KERNEL = None
 STATE = {'phase': 'idle', 'result': None, 'started_at': None, 'ended_at': None,
          'limit': 300, 'match_id': None, 'players': {}, 'events': [], 'event_seq': 0, 'config': None,
-         'outcome': None, 'winner': None, 'prediction': None, 'prediction_history': []}
+         'outcome': None, 'winner': None, 'prediction': None, 'prediction_history': [],
+         'observer': {'status': 'unavailable', 'message': 'No kernel observation recorded'}}
 LAST = RUNS / 'latest.json'
 CATALOG = json.loads((ROOT / 'models.json').read_text())
 SELECTION = RUNS / 'model-selection.json'
@@ -49,6 +52,7 @@ if LAST.exists():
         if STATE['phase'] in ACTIVE:
             STATE.update(phase='interrupted', result='Dashboard restarted; previous match is not being refereed.', ended_at=time.time())
             STATE['prediction'] = {'status': 'stopped', 'message': 'Previous match interrupted'}
+            STATE['observer'] = {'status': 'unavailable', 'message': 'Dashboard restarted; kernel observation interrupted'}
     except (ValueError, OSError, TypeError):
         pass
 
@@ -222,15 +226,38 @@ def refresh_eliminations():
     """Late command results may explain an already observed death; never undo it."""
     for identity, info in STATE['players'].items():
         death = info.get('death_at')
-        if info.get('state') != 'eliminated' or death is None or time.time() - death > 3:
+        revoke = (KERNEL and KERNEL.match_id == STATE.get('match_id') and KERNEL.failed
+                  and (info.get('elimination') or {}).get('confidence') == 'confirmed')
+        if info.get('state') != 'eliminated' or death is None or (time.time() - death > 5 and not revoke):
             continue
-        report = explain_elimination(identity, info, STATE['players'], STATE.get('events', []), time.time())
+        report = elimination_report(identity, info)
         if info.get('elimination_event_seq'):
             report['evidence_seqs'] = sorted(set(report['evidence_seqs'] + [info['elimination_event_seq']]))
         if report != info.get('elimination'):
             info['elimination'] = report
             event('referee', 'attribution', f'{info["name"]}: {report["summary"]}',
                   {'contestant': identity, **report})
+
+
+def elimination_report(identity, info):
+    """Only the external referee declares death; kernel evidence explains it."""
+    existing = info.get('elimination') or {}
+    coverage_failed = KERNEL and KERNEL.match_id == STATE.get('match_id') and KERNEL.failed
+    if existing.get('confidence') == 'confirmed' and not coverage_failed:
+        return copy.deepcopy(existing)
+    if KERNEL and KERNEL.match_id == STATE.get('match_id') and info.get('alive') is False:
+        report = KERNEL.explain(identity, info)
+        if report:
+            attacker = STATE['players'].get(report.get('attacker'), {})
+            label = attacker.get('name') or report.get('attacker') or 'An opponent'
+            report = copy.deepcopy(report)
+            report.setdefault('evidence_seqs', [])
+            report['summary'] = f'{label}: kernel evidence confirms an SSH process chain sent the fatal signal to this contestant.'
+            return report
+    fallback = explain_elimination(identity, info, STATE['players'], STATE.get('events', []), time.time())
+    if existing.get('confidence') == 'confirmed' and coverage_failed:
+        fallback['summary'] += ' Kernel confirmation withdrawn because trace coverage was interrupted.'
+    return fallback
 
 
 def follow_logs(player, cid, finished):
@@ -335,7 +362,7 @@ def apply_observations(observations):
             if not info['alive']:
                 eliminated = True
                 info.update(state='eliminated', activity='eliminated', death_at=time.time())
-                report = explain_elimination(player, info, STATE['players'], STATE.get('events', []), info['death_at'])
+                report = elimination_report(player, info)
                 info['elimination'] = report
                 row = event('referee', 'elimination', f'{info["name"]} eliminated: {report["summary"]}',
                             {'contestant': player, **report})
@@ -399,6 +426,7 @@ def finalize_forecast():
 
 
 def match(settings):
+    global KERNEL
     finished = threading.Event()
     log_threads = []
     resource_thread = None
@@ -407,6 +435,7 @@ def match(settings):
     path = RUNS / (STATE['match_id'] + '.compose.json')
     compose = ['docker', 'compose', '--project-name', project, '-f', str(path)]
     containers = {}
+    observer = None
     try:
         path.write_text(json.dumps(compose_config(settings)))
         event('referee', 'system', f'Preparing {len(settings["players"])} fresh contestant computers.')
@@ -436,7 +465,7 @@ def match(settings):
             data = json.loads(command('docker', 'inspect', cid).stdout)[0]
             port = data['NetworkSettings']['Ports']['8080/tcp'][0]['HostPort']
             with LOCK:
-                STATE['players'][identity].update(container_id=cid, tracked_pid=tracked['pid'],
+                STATE['players'][identity].update(container_id=cid, tracked_pid=tracked['pid'], supervisor_pid=tracked['parent'],
                     alive=True, state='ready', container='running', health='up',
                     arena_ips=[n['IPAddress'] for n in data['NetworkSettings'].get('Networks', {}).values() if n.get('IPAddress')],
                     health_url=f'http://127.0.0.1:{port}', app_url=None)
@@ -445,6 +474,26 @@ def match(settings):
                     STATE['players'][identity]['app_url'] = f'http://127.0.0.1:{app[0]["HostPort"]}'
             thread = threading.Thread(target=follow_logs, args=(identity, cid, finished), daemon=True)
             thread.start(); log_threads.append(thread)
+        match_id = STATE['match_id']
+        def observer_changed():
+            if observer is None:
+                return
+            with observer.lock:
+                status = dict(observer.state)
+            with LOCK:
+                if STATE.get('match_id') != match_id:
+                    return
+                previous = STATE.get('observer', {})
+                STATE['observer'] = status
+                if (previous.get('status'), previous.get('message')) != (status.get('status'), status.get('message')):
+                    event('referee', 'observer', status.get('message', 'Kernel observer status changed'), status)
+        observer = MatchObserver(match_id, {p: {'container_id': i['container_id'],
+                     'tracked_pid': i['tracked_pid'], 'supervisor_pid': i['supervisor_pid']}
+                     for p, i in STATE['players'].items()}, RUNS, observer_changed, cancel_event=STOP)
+        KERNEL = observer
+        observer.start()
+        if STOP.is_set():
+            raise MatchCanceled()
         start = time.time() + 2
         for cid in containers.values():
             if STOP.is_set():
@@ -472,6 +521,9 @@ def match(settings):
                     pairs = [(p, dict(i)) for p, i in STATE['players'].items() if i['alive']]
                 observations = list(pool.map(lambda pair: observe(*pair), pairs))
                 result = apply_observations(observations)
+                with LOCK:
+                    STATE['observer'] = observer.status()
+                    refresh_eliminations()
                 if result:
                     break
                 if time.time() - start >= settings['duration_seconds']:
@@ -494,6 +546,20 @@ def match(settings):
             STATE.update(phase='finishing', result=f'Match interrupted: {type(exc).__name__}', ended_at=time.time(), failure=True, outcome='invalid')
         event('referee', 'error', str(exc) if not isinstance(exc, subprocess.CalledProcessError) else 'Docker startup/observation failed. Check the image and credential files.')
     finally:
+        # Drain timestamp-reordered trace events before cleanup generates its own
+        # signals. Confirmed reports remain historical evidence after stop.
+        if observer:
+            try:
+                until = time.monotonic() + .75
+                while time.monotonic() < until:
+                    with LOCK:
+                        refresh_eliminations()
+                    time.sleep(.05)
+                observer.stop()
+                with LOCK:
+                    refresh_eliminations()
+            except Exception:
+                event('referee', 'observer', 'Kernel observer cleanup failed; inspect its match container.')
         try:
             finalize_forecast()
         except OSError:
@@ -519,15 +585,18 @@ def match(settings):
 
 
 def start_match(settings):
+    global KERNEL
     settings = validate_config(settings)
     check_credentials(settings)
     with LOCK:
         if STATE['phase'] in ACTIVE:
             raise RuntimeError('Match already active')
         STOP.clear()
+        KERNEL = None
         identity = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S') + '-' + secrets.token_hex(3)
         STATE.update(phase='preparing', result=None, started_at=None, ended_at=None, failure=False,
                      outcome=None, winner=None, prediction_history=[],
+                     observer={'status': 'starting', 'message': 'Kernel observer starts before the contestants'},
                      prediction={'status': 'waiting', 'message': 'Live forecasts start with the match'},
                      match_id=identity, limit=settings['duration_seconds'], config=settings, event_seq=0, events=[],
                      players={p['id']: {**p, 'configured_model': p['model'], 'model': None,
@@ -538,6 +607,7 @@ def start_match(settings):
         (RUNS / (identity + '.jsonl')).touch()
         (RUNS / (identity + '.metrics.jsonl')).touch()
         (RUNS / (identity + '.predictions.jsonl')).touch()
+        (RUNS / (identity + '.kernel.jsonl')).touch(mode=0o600)
         save()
         threading.Thread(target=match, args=(settings,), daemon=True).start()
 
@@ -583,7 +653,7 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path.startswith('/api/export/'):
             kind = url.path.rsplit('/', 1)[-1]
             extensions = {'manifest': '.manifest.json', 'events': '.jsonl', 'metrics': '.metrics.jsonl',
-                          'snapshot': '.snapshot.json', 'predictions': '.predictions.jsonl'}
+                          'snapshot': '.snapshot.json', 'predictions': '.predictions.jsonl', 'kernel': '.kernel.jsonl'}
             with LOCK:
                 identity = STATE['match_id']
                 if kind not in extensions or not identity:
@@ -591,7 +661,7 @@ class Handler(BaseHTTPRequestHandler):
                 path = RUNS / (identity + extensions[kind])
                 if not path.is_file():
                     self.send(404, '{}'); return
-                self.send(200, path.read_bytes(), 'application/x-ndjson' if kind in ('events', 'metrics', 'predictions') else 'application/json', path.name)
+                self.send(200, path.read_bytes(), 'application/x-ndjson' if kind in ('events', 'metrics', 'predictions', 'kernel') else 'application/json', path.name)
         else:
             self.send(404, '{}')
 
