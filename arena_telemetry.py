@@ -33,20 +33,46 @@ def consume(info, harness, data, emit):
     if not isinstance(data, dict):
         return
     kind = data.get('type')
+    if kind == 'arena.model':
+        info.update(model=data.get('model') or info.get('configured_model'),
+                    session_id=data.get('session_id') or info.get('session_id'))
+        label = 'Native harness connected' if harness in ('codex', 'claude') else 'Shared tool harness connected'
+        emit('system', label, {'harness': harness, 'model': info.get('model')})
+        return
+    if kind == 'arena.message':
+        emit('message', data.get('text', ''), {})
+        return
+    if kind == 'arena.tool':
+        status = data.get('status')
+        if status in ('running', 'completed', 'failed'):
+            tool_event(info, emit, data.get('tool_id', 'shell'), data.get('name', 'shell'),
+                       status, data.get('output'), data.get('exit_code'))
+        return
+    if kind == 'arena.usage':
+        usage = data.get('usage')
+        if isinstance(usage, dict):
+            info['usage'] = {field: count(usage.get(field)) for field in
+                             ('input_tokens', 'output_tokens', 'cached_input_tokens', 'cache_write_tokens')}
+            emit('usage', 'Model usage updated', {'usage': info['usage']})
+        return
     if kind == 'arena.session':
         phase = data.get('phase')
         info.update(activity=phase, turn=data.get('turn', info.get('turn', 0)))
         if phase == 'active':
             info.update(turn_started_at=data.get('started_at', time.time()), next_turn_at=None, active_tools={}, current_tool=None)
-        if phase in ('idle', 'failed'):
+        if phase in ('idle', 'failed', 'turn_error', 'blocked'):
             info.update(last_turn_seconds=data.get('duration_seconds'), next_turn_at=data.get('next_turn_at'),
                         current_tool=None, active_tools={})
         if data.get('session_id'):
             info['session_id'] = data['session_id']
-        if phase == 'failed':
+        if phase in ('failed', 'turn_error', 'blocked'):
             info['model_exit_code'] = data.get('exit_code')
             info['last_error'] = data.get('message')
-        emit('session', data.get('message') or f'Model turn {info["turn"]} started', {'phase': phase, 'turn': info['turn']})
+            info['error_category'] = data.get('error_category')
+            info['error_phase'] = phase
+            info['error_at'] = time.time()
+        emit('session', data.get('message') or f'Model turn {info["turn"]} started',
+             {key: data.get(key) for key in ('phase', 'turn', 'exit_code', 'error_category', 'next_turn_at', 'duration_seconds')})
         return
     if harness == 'codex':
         item = data.get('item') or {}
@@ -80,7 +106,9 @@ def consume(info, harness, data, emit):
             turn = str(info.get('turn', 0))
             seen = info.setdefault('usage_turns', [])
             if isinstance(usage, dict) and turn not in seen:
-                totals = info.setdefault('usage', {'input_tokens': 0, 'output_tokens': 0, 'cached_input_tokens': 0, 'cache_write_tokens': 0})
+                if not isinstance(info.get('usage'), dict):
+                    info['usage'] = {'input_tokens': 0, 'output_tokens': 0, 'cached_input_tokens': 0, 'cache_write_tokens': 0}
+                totals = info['usage']
                 for field in ('input_tokens', 'output_tokens', 'cached_input_tokens'):
                     totals[field] += count(usage.get(field))
                 totals['cache_write_tokens'] += count(usage.get('cache_write_input_tokens'))

@@ -44,7 +44,8 @@
         "id": "gpt-5.5",
         "label": "GPT-5.5"
       }
-    ]
+    ],
+    "execution": "native"
   },
   "claude": {
     "label": "Claude Code / Anthropic",
@@ -102,6 +103,45 @@
       {
         "id": "claude-sonnet-4-5-20250929",
         "label": "Claude Sonnet 4.5"
+      }
+    ],
+    "execution": "native"
+  },
+  "gemini": {
+    "label": "Gemini / Arena Shell",
+    "default": "gemini-3.8-flash",
+    "source": "Google OpenAI-compatibility documentation; account availability not verified",
+    "docs_url": "https://ai.google.dev/gemini-api/docs/openai",
+    "execution": "shared",
+    "models": [
+      {
+        "id": "gemini-3.8-flash",
+        "label": "Gemini 3.8 Flash"
+      }
+    ]
+  },
+  "grok": {
+    "label": "Grok / Arena Shell",
+    "default": "grok-4.7",
+    "source": "xAI Chat Completions documentation; account availability not verified",
+    "docs_url": "https://docs.x.ai/developers/model-capabilities/legacy/chat-completions",
+    "execution": "shared",
+    "models": [
+      {
+        "id": "grok-4.7",
+        "label": "Grok 4.7"
+      }
+    ]
+  },
+  "compatible": {
+    "label": "Open model / Compatible API",
+    "default": "",
+    "source": "Your tool-capable OpenAI-compatible endpoint",
+    "execution": "shared",
+    "models": [
+      {
+        "id": "",
+        "label": "Enter custom model ID"
       }
     ]
   }

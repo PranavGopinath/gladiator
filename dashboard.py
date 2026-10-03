@@ -17,6 +17,7 @@ from urllib.parse import urlsplit, parse_qs
 from arena_config import default_config, validate_config, compose_config, check_credentials
 from arena_telemetry import consume, resource_sample
 from jev import JevClient, run_forecasts, interval_seconds, terminal_prediction
+from arena_attribution import explain_elimination
 
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / '.runs'
@@ -32,6 +33,11 @@ LAST = RUNS / 'latest.json'
 CATALOG = json.loads((ROOT / 'models.json').read_text())
 SELECTION = RUNS / 'model-selection.json'
 SELECTED = {provider: info['default'] for provider, info in CATALOG.items()}
+SECRET_FILES = ('codex-auth.json', 'anthropic-api-key', 'gemini-api-key',
+                'xai-api-key', 'compatible-api-key')
+CREDENTIAL_LOCK = threading.Lock()
+CREDENTIAL_SIGNATURE = None
+CREDENTIAL_VALUES = ()
 if SELECTION.exists():
     SELECTED.update(json.loads(SELECTION.read_text()))
 if LAST.exists():
@@ -63,8 +69,73 @@ def validate_models(models):
     return selected
 
 
+def provider_catalog():
+    """Expose availability and setup hints, never credential contents."""
+    catalog = copy.deepcopy(CATALOG)
+    keyfiles = {'codex': 'codex-auth.json', 'claude': 'anthropic-api-key',
+                'gemini': 'gemini-api-key', 'grok': 'xai-api-key', 'compatible': 'compatible-api-key'}
+    for provider, info in catalog.items():
+        filename = keyfiles.get(provider)
+        info['configured'] = bool(filename and (ROOT / '.secrets' / filename).is_file())
+        info['harness_type'] = 'native' if provider in ('codex', 'claude') else 'shared'
+        info['credential_hint'] = ('API key optional for local servers; set your endpoint URL.'
+                                   if provider == 'compatible' else
+                                   'Configured on this computer.' if info['configured'] else
+                                   f'Add .secrets/{filename} on the host.')
+    return catalog
+
+
+def credential_values():
+    """Cache only designated secret files, refreshing when they are rotated.
+
+    Arbitrary compatible-server credentials and opaque OAuth refresh tokens do
+    not necessarily have recognizable prefixes. Never publish their values.
+    """
+    global CREDENTIAL_SIGNATURE, CREDENTIAL_VALUES
+    with CREDENTIAL_LOCK:
+        files = [ROOT / '.secrets' / name for name in SECRET_FILES]
+        signature = []
+        for path in files:
+            try:
+                stat = path.stat()
+                signature.append((str(path), stat.st_mtime_ns, stat.st_size, stat.st_ino))
+            except OSError:
+                signature.append((str(path), None))
+        signature = tuple(signature)
+        if signature == CREDENTIAL_SIGNATURE:
+            return CREDENTIAL_VALUES
+        values = set()
+        sensitive = {'accesstoken', 'refreshtoken', 'idtoken', 'token', 'apikey',
+                     'openaiapikey', 'password', 'secret', 'clientsecret', 'accountid'}
+        def collect(value):
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if isinstance(child, str) and re.sub(r'[^a-z]', '', key.casefold()) in sensitive and child:
+                        values.add(child)
+                    elif isinstance(child, (dict, list)):
+                        collect(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect(child)
+        for path in files:
+            try:
+                contents = path.read_text().strip()
+                if path.name == 'codex-auth.json':
+                    collect(json.loads(contents))
+                elif contents:
+                    values.add(contents)
+            except (OSError, ValueError):
+                continue
+        CREDENTIAL_VALUES = tuple(sorted(values, key=len, reverse=True))
+        CREDENTIAL_SIGNATURE = signature
+        return CREDENTIAL_VALUES
+
+
 def clean(text):
-    text = re.sub(r'sk-[A-Za-z0-9_-]+|eyJ[A-Za-z0-9_.-]{30,}', '[credential redacted]', str(text))
+    text = str(text)
+    for value in credential_values():
+        text = text.replace(value, '[credential redacted]')
+    text = re.sub(r'(?:sk-|xai-)[A-Za-z0-9_-]+|AIza[A-Za-z0-9_-]{20,}|eyJ[A-Za-z0-9_.-]{30,}', '[credential redacted]', text)
     return re.sub(r'(?i)(Bearer\s+)\S+', r'\1[redacted]', text)[:32000]
 
 
@@ -89,6 +160,7 @@ def event(player, kind, text, data=None):
         if match_id:
             with (RUNS / (match_id + '.jsonl')).open('a') as output:
                 output.write(json.dumps(row) + '\n')
+        return row
 
 
 def public_state():
@@ -96,6 +168,11 @@ def public_state():
     for player in state['players'].values():
         player.pop('usage_turns', None)
         player.pop('active_tools', None)
+    # Enrich older recordings for display without rewriting their original log.
+    for identity, info in state['players'].items():
+        if info.get('state') == 'eliminated' and not info.get('elimination'):
+            info['elimination'] = explain_elimination(identity, info, state['players'],
+                state.get('events', []), time.time())
     return sanitized(state)
 
 
@@ -137,6 +214,23 @@ def parse_log(player, line):
             info['last_activity_at'] = time.time()
         if info.get('state') == 'eliminated':
             info['activity'] = 'eliminated'
+        if STATE['event_seq'] != previous:
+            refresh_eliminations()
+
+
+def refresh_eliminations():
+    """Late command results may explain an already observed death; never undo it."""
+    for identity, info in STATE['players'].items():
+        death = info.get('death_at')
+        if info.get('state') != 'eliminated' or death is None or time.time() - death > 3:
+            continue
+        report = explain_elimination(identity, info, STATE['players'], STATE.get('events', []), time.time())
+        if info.get('elimination_event_seq'):
+            report['evidence_seqs'] = sorted(set(report['evidence_seqs'] + [info['elimination_event_seq']]))
+        if report != info.get('elimination'):
+            info['elimination'] = report
+            event('referee', 'attribution', f'{info["name"]}: {report["summary"]}',
+                  {'contestant': identity, **report})
 
 
 def follow_logs(player, cid, finished):
@@ -205,7 +299,16 @@ def observe(player, info):
     running = status['Running']
     table = process_table(info['container_id']) if running else []
     if table is None:
-        raise RuntimeError('Cannot read host process table')
+        # The container can die between inspect and top. Confirm that transition
+        # before treating a failed top as an infrastructure error.
+        result = command('docker', 'inspect', info['container_id'], check=False)
+        if result.returncode:
+            raise RuntimeError('Cannot inspect contestant container')
+        status = json.loads(result.stdout)[0]['State']
+        running = status['Running']
+        if running:
+            raise RuntimeError('Cannot read host process table')
+        table = []
     alive = running and any(row['pid'] == info['tracked_pid'] and not row['status'].startswith('Z') for row in table)
     health = 'down'
     if running and not status.get('Paused'):
@@ -227,12 +330,18 @@ def apply_observations(observations):
         for player, observation in observations:
             info = STATE['players'][player]
             if not info['alive']:
-                eliminated = True
                 continue # Preserve the first elimination and its evidence.
             info.update(observation)
             if not info['alive']:
+                eliminated = True
                 info.update(state='eliminated', activity='eliminated', death_at=time.time())
-                event('referee', 'elimination', f'{info["name"]} eliminated: {info["reason"]}', {'contestant': player})
+                report = explain_elimination(player, info, STATE['players'], STATE.get('events', []), info['death_at'])
+                info['elimination'] = report
+                row = event('referee', 'elimination', f'{info["name"]} eliminated: {report["summary"]}',
+                            {'contestant': player, **report})
+                if isinstance(row, dict):
+                    info['elimination_event_seq'] = row['seq']
+                    report['evidence_seqs'] = sorted(set(report['evidence_seqs'] + [row['seq']]))
         alive = [p for p, i in STATE['players'].items() if i['alive']]
         if eliminated:
             # Do not display stale probabilities for an impossible outcome.
@@ -329,6 +438,7 @@ def match(settings):
             with LOCK:
                 STATE['players'][identity].update(container_id=cid, tracked_pid=tracked['pid'],
                     alive=True, state='ready', container='running', health='up',
+                    arena_ips=[n['IPAddress'] for n in data['NetworkSettings'].get('Networks', {}).values() if n.get('IPAddress')],
                     health_url=f'http://127.0.0.1:{port}', app_url=None)
                 app = data['NetworkSettings']['Ports'].get('8000/tcp')
                 if app:
@@ -455,7 +565,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, json.dumps(sanitized(STATE.get('config') or default_config())))
         elif url.path == '/api/models':
             with LOCK:
-                self.send(200, json.dumps({'providers': CATALOG, 'selected': SELECTED}))
+                self.send(200, json.dumps({'providers': provider_catalog(), 'selected': SELECTED}))
         elif url.path == '/api/state':
             query = parse_qs(url.query)
             try:

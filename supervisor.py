@@ -19,6 +19,9 @@ def agent_command():
         if not command:
             raise ValueError("AGENT=custom requires AGENT_COMMAND")
         return command
+    if kind in ("gemini", "grok", "compatible"):
+        task = os.environ.get("TASK") or Path(__file__).with_name("task.txt").read_text()
+        return ["python3", "-u", str(Path(__file__).with_name("universal_harness.py")), task]
     if kind in ("codex", "claude"):
         task = os.environ.get("TASK") or Path(__file__).with_name("task.txt").read_text()
         if kind == "codex":
@@ -33,7 +36,7 @@ def agent_command():
         if os.environ.get("MODEL"):
             command += ["--model", os.environ["MODEL"]]
         return command + [task]
-    raise ValueError("AGENT must be demo, codex, claude, or custom")
+    raise ValueError("Unknown AGENT harness")
 
 
 def launch_options():
@@ -65,6 +68,14 @@ def launch_options():
         # when machine administration is needed, while the supervisor stays root.
         env.update(HOME="/home/node", USER="node", LOGNAME="node")
         options.update(user="node", group="node", extra_groups=[])
+    elif kind in ("gemini", "grok", "compatible"):
+        from universal_harness import provider_settings
+        # Validate and load the selected provider's secret without putting it in argv.
+        provider = provider_settings(env)
+        key_name = {"gemini": "GEMINI_API_KEY", "grok": "XAI_API_KEY",
+                    "compatible": "COMPATIBLE_API_KEY"}[kind]
+        if provider["api_key"]:
+            env[key_name] = provider["api_key"]
     return options
 
 

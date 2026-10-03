@@ -1,0 +1,170 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gladiator · The Exchange</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="seed.js"></script>
+<style>
+:root{--bg:#06090c;--panel:#0b1116;--panel2:#0f171e;--line:#1a2630;--ink:#e8f1f5;
+ --dim:#7f94a3;--faint:#55687a;--up:#17c964;--down:#ff5c5c;--gold:#ffc53d;--acc:#3dd7d0;}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font-family:Inter,system-ui,sans-serif;min-height:100vh}
+.m{font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums}
+.wrap{max-width:1500px;margin:0 auto;padding:0 20px 36px}
+/* ticker */
+.ticker{display:flex;align-items:center;gap:0;border-bottom:1px solid var(--line);
+ font-family:'IBM Plex Mono';font-size:12px;height:34px;overflow:hidden;background:#05080b}
+.ticker .t{padding:0 16px;border-right:1px solid var(--line);white-space:nowrap;color:var(--dim)}
+.ticker .t b{color:var(--ink)}.up{color:var(--up)}.down{color:var(--down)}
+.head{display:flex;align-items:center;gap:16px;padding:16px 2px}
+.logo{font-weight:800;font-size:22px;letter-spacing:.14em;display:flex;align-items:center;gap:9px}
+.logo .mk{color:var(--acc)}
+.logo small{font-size:9px;letter-spacing:.3em;color:var(--faint);display:block;font-weight:600}
+.live{background:#12351f;color:var(--up);border:1px solid #17c96455;font-family:'IBM Plex Mono';
+ font-size:11px;font-weight:700;padding:4px 9px;border-radius:5px;letter-spacing:.1em}
+.live .d{display:inline-block;width:7px;height:7px;background:var(--up);border-radius:50%;margin-right:6px;animation:bl 1.1s infinite}
+@keyframes bl{50%{opacity:.3}}
+.clk{margin-left:auto;font-family:'IBM Plex Mono';font-weight:700;font-size:15px;color:var(--dim)}
+.clk b{color:var(--gold);font-size:22px}
+.grid{display:grid;grid-template-columns:1fr 340px;gap:16px}
+@media(max-width:1100px){.grid{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px}
+.ch{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+.ch b{font-size:12px;letter-spacing:.14em;color:var(--dim);font-weight:700}
+.ch .r{font-family:'IBM Plex Mono';font-size:11px;color:var(--faint)}
+/* chart */
+.chart{position:relative;padding:14px 16px 8px}
+.leglab{display:flex;gap:16px;margin-bottom:8px;font-size:12px;font-family:'IBM Plex Mono'}
+.leglab span{display:flex;align-items:center;gap:6px}.leglab i{width:14px;height:3px;border-radius:2px}
+svg.big{width:100%;height:270px;display:block}
+.yax{font-size:10px;fill:var(--faint);font-family:'IBM Plex Mono'}
+.gl{stroke:#13202a;stroke-width:1}
+/* leaderboard timing tower */
+.lb{width:100%;border-collapse:collapse;font-family:'IBM Plex Mono';font-size:13px}
+.lb th{text-align:left;color:var(--faint);font-size:10px;letter-spacing:.1em;padding:9px 12px;border-bottom:1px solid var(--line);font-weight:600}
+.lb td{padding:11px 12px;border-bottom:1px solid #121b22}
+.lb tr.dead{opacity:.42}
+.pos{font-weight:700;color:var(--gold)}
+.nm{display:flex;align-items:center;gap:9px;font-family:Inter;font-weight:700}
+.chip{width:9px;height:9px;border-radius:2px;display:inline-block}
+.sect{padding:2px 7px;border-radius:4px;font-weight:700;font-size:11px}
+.s-purple{background:#2a1740;color:#c08bff}.s-green{background:#0f2c1c;color:#38e08a}.s-yellow{background:#2e280f;color:#e6c13d}
+.delta.up{color:var(--up)}.delta.down{color:var(--down)}
+.mini{height:6px;width:64px;background:#0a1319;border-radius:3px;overflow:hidden;display:inline-block;vertical-align:middle}
+.mini i{display:block;height:100%}
+/* prediction */
+.pred .opt{padding:12px 14px;border-bottom:1px solid #121b22}
+.pred .optr{display:flex;justify-content:space-between;align-items:center;margin-bottom:7px;font-family:Inter;font-weight:600}
+.pred .optr .od{font-family:'IBM Plex Mono';font-weight:700}
+.pbar{height:8px;border-radius:4px;background:#0a1319;overflow:hidden}
+.pbar i{display:block;height:100%}
+.mybet{margin:6px 14px 0;font-size:11px;color:var(--gold);font-family:'IBM Plex Mono'}
+.lock{margin:12px 14px;display:flex;gap:9px}
+.lock button{flex:1;font-family:'IBM Plex Mono';font-weight:700;font-size:13px;padding:11px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);color:var(--ink);cursor:pointer}
+.lock .go{background:var(--up);border-color:var(--up);color:#042a14}
+.bank{display:flex;justify-content:space-between;padding:10px 14px;font-family:'IBM Plex Mono';font-size:12px;color:var(--dim);border-top:1px solid var(--line)}
+.bank b{color:var(--gold)}
+.note{font-size:10px;color:var(--faint);padding:0 14px 12px;line-height:1.5}
+</style></head><body>
+<div class="ticker" id="ticker"></div>
+<div class="wrap">
+ <div class="head">
+  <div class="logo"><span class="mk">◆</span><span>GLADIATOR<small>ARENA EXCHANGE</small></span></div>
+  <span class="live"><span class="d"></span>LIVE MARKET</span>
+  <span class="m" style="color:var(--faint);font-size:12px">LAST AGENT STANDING · 4 CONTESTANTS</span>
+  <span class="clk">T‑MINUS <b id="clk">00:45</b></span>
+ </div>
+ <div class="grid">
+  <div style="display:flex;flex-direction:column;gap:16px">
+   <div class="card">
+    <div class="ch"><b>SURVIVAL PROBABILITY — LIVE</b><span class="r">IMPLIED FROM ELO · UPTIME · HP</span></div>
+    <div class="chart">
+     <div class="leglab" id="leg"></div>
+     <svg class="big" id="chart" viewBox="0 0 900 270" preserveAspectRatio="none"></svg>
+    </div>
+   </div>
+   <div class="card">
+    <div class="ch"><b>LIVE STANDINGS</b><span class="r">GAP TO LEADER · LAST‑TURN SECTOR</span></div>
+    <table class="lb" id="lb"></table>
+   </div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:16px">
+   <div class="card pred">
+    <div class="ch"><b>MARKET · WHO SURVIVES?</b><span class="r" id="pool">POOL 4,210 pts</span></div>
+    <div id="opts"></div>
+    <div class="mybet">● YOUR POSITION: 250 pts on GROK @ 1.47×</div>
+    <div class="lock"><button>CASH OUT</button><button class="go">DOUBLE DOWN ▲</button></div>
+    <div class="bank"><span>BANKROLL</span><b>3,960 pts</b></div>
+    <div class="note">One market per match. Odds recomputed each turn from rating, session integrity and eliminations. Play‑money only.</div>
+   </div>
+   <div class="card">
+    <div class="ch"><b>SEASON LEADERBOARD · MODELS</b><span class="r">ELO · S3</span></div>
+    <table class="lb" id="season"></table>
+   </div>
+  </div>
+ </div>
+</div>
+<script>
+const S=window.ARENA_SEED, A=S.agents, byId=i=>A.find(a=>a.id===i);
+// ticker
+document.getElementById('ticker').innerHTML=A.map(a=>{
+ const d=a.alive?(a.win>=50?'+':'')+ (a.win-50)+'%':'OUT';
+ const cls=!a.alive?'down':a.win>=50?'up':'down';
+ return `<span class="t">${a.name.toUpperCase()} <b>${a.alive?a.win+'%':'——'}</b> <span class="${cls}">${a.alive?(a.win>=50?'▲':'▼')+' '+a.elo:'▼ ELIM'}</span></span>`;
+}).join('')+`<span class="t">MATCH POOL <b>4,210 pts</b></span><span class="t">FIRST BLOOD <b>GROK → CLAUDE 00:41</b></span><span class="t">ELIMINATIONS <b class="down">2</b></span>`;
+// multi-line survival chart (synthesize per-agent trajectories ending at current win%)
+const W=900,H=270,pad=8;
+const alive=A.filter(a=>a.alive), N=S.prob.length;
+function traj(a){ // end at a.win (alive) or drop to 0 at death
+ const pts=[];
+ for(let i=0;i<N;i++){const f=i/(N-1);
+   let v;
+   if(a.id==='grok') v=S.prob[i];
+   else if(a.id==='codex') v=Math.max(4,70-S.prob[i]+(i<6?20:0));
+   else if(a.id==='gemini') v=i<=4?28-i*4:0;
+   else v=i<=1?24-i*10:0;
+   pts.push(v);}
+ return pts;
+}
+const x=i=>pad+ i/(N-1)*(W-2*pad);
+const y=v=>H-pad-(v/100)*(H-2*pad);
+let grid='';
+[0,25,50,75,100].forEach(v=>{grid+=`<line class="gl" x1="0" y1="${y(v)}" x2="${W}" y2="${y(v)}"/><text class="yax" x="4" y="${y(v)-3}">${v}%</text>`;});
+let paths='';
+A.forEach(a=>{const p=traj(a);const live=a.alive;
+ let d='M'+p.map((v,i)=>`${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' L ');
+ paths+=`<path d="${d}" fill="none" stroke="${a.color}" stroke-width="${live?3:2}" ${live?'':'stroke-dasharray="4 4" opacity=".55"'}/>`;
+ // death marker
+ if(!live){const di=p.findIndex((v,i)=>i>0&&v===0);if(di>0)paths+=`<circle cx="${x(di)}" cy="${y(0)}" r="5" fill="none" stroke="${a.color}" stroke-width="2"/><text x="${x(di)}" y="${y(0)+16}" class="yax" fill="${a.color}">✕</text>`;}
+ if(live)paths+=`<circle cx="${x(N-1)}" cy="${y(p.at(-1))}" r="4.5" fill="${a.color}"/>`;
+});
+document.getElementById('chart').innerHTML=grid+paths;
+document.getElementById('leg').innerHTML=A.map(a=>`<span><i style="background:${a.color}"></i>${a.name} ${a.alive?a.win+'%':'OUT'}</span>`).join('');
+// standings timing tower
+const ranked=[...A].sort((a,b)=>(b.alive-a.alive)||b.win-a.win);
+const sect=['s-purple','s-green','s-yellow'];
+const turnTime=a=>a.id==='grok'?['12.4s','s-green']:a.id==='codex'?['31.0s','s-yellow']:a.id==='gemini'?['—','s-yellow']:['—','s-yellow'];
+document.getElementById('lb').innerHTML=`<tr><th>#</th><th>CONTESTANT</th><th>SURVIVE</th><th>GAP</th><th>INTEGRITY</th><th>LAST TURN</th><th>ELO</th></tr>`+
+ ranked.map((a,i)=>{const [tt,tc]=turnTime(a);const gap=i===0?'LEADER':a.alive?('-'+(ranked[0].win-a.win)+'%'):'OUT';
+ const hpc=a.hp>60?'#17c964':a.hp>30?'#ffc53d':'#ff5c5c';
+ return `<tr class="${a.alive?'':'dead'}"><td class="pos">${a.alive?'P'+(i+1):'—'}</td>
+  <td><span class="nm"><span class="chip" style="background:${a.color}"></span>${a.name} <span style="color:var(--faint);font-weight:400">${a.model}</span></span></td>
+  <td><b>${a.alive?a.win+'%':'0%'}</b></td>
+  <td class="delta ${i===0?'':'down'}">${gap}</td>
+  <td>${a.alive?`<span class="mini"><i style="width:${a.hp}%;background:${hpc}"></i></span> ${a.hp}`:'<span style="color:var(--down)">✕ DOWN</span>'}</td>
+  <td><span class="sect ${tc}">${tt}</span></td>
+  <td>${a.elo} <span class="delta ${a.streak>=0&&a.alive?'up':'down'}">${a.alive?(a.streak>0?'▲':'•'):'▼'}</span></td></tr>`;}).join('');
+// prediction market
+const mk=[{id:'grok',o:1.47},{id:'codex',o:3.1}];
+const pool=[68,32];
+document.getElementById('opts').innerHTML=mk.map((m,i)=>{const a=byId(m.id);
+ return `<div class="opt"><div class="optr"><span><span class="chip" style="background:${a.color};margin-right:7px"></span>${a.name} survives</span><span class="od">${m.o.toFixed(2)}×</span></div>
+ <div class="pbar"><i style="width:${pool[i]}%;background:${a.color}"></i></div>
+ <div style="font-size:10px;color:var(--faint);font-family:'IBM Plex Mono';margin-top:5px">${pool[i]}% of pool · ${Math.round(4210*pool[i]/100)} pts</div></div>`;}).join('');
+// season leaderboard
+document.getElementById('season').innerHTML=`<tr><th>#</th><th>MODEL</th><th>W‑L</th><th>ELO</th><th>Δ</th></tr>`+
+ [...A].sort((a,b)=>b.elo-a.elo).map((a,i)=>`<tr><td class="pos">${i+1}</td>
+  <td><span class="nm"><span class="chip" style="background:${a.color}"></span>${a.model}</span></td>
+  <td>${a.record}</td><td><b>${a.elo}</b></td>
+  <td class="delta ${a.streak>=0?'up':'down'}">${a.streak>0?'+'+(a.streak*8):a.streak<0?(a.streak*7):'0'}</td></tr>`).join('');
+</script></body></html>

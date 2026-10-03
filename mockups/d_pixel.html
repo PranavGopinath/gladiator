@@ -1,0 +1,256 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gladiator · Pixel Arena</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+<script src="seed.js"></script>
+<style>
+:root{--bg:#0a0a16;--ink:#e8f1f5;--dim:#9aa7c7;--faint:#5b6788;--gold:#ffd23f;--up:#39e08a;--down:#ff5b6e;--acc:#49c7ff;--panel:#13132a;--line:#262649}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font-family:'IBM Plex Mono',monospace;min-height:100vh;
+ background-image:radial-gradient(900px 500px at 50% -10%,#1b1b44,transparent)}
+.px{font-family:'Press Start 2P',monospace}
+.wrap{max-width:1360px;margin:0 auto;padding:16px 18px 40px}
+.top{display:flex;align-items:center;gap:16px;padding:6px 2px 16px}
+.logo{display:flex;align-items:center;gap:12px}
+.logo .px{font-size:19px;color:#fff;text-shadow:3px 3px 0 #ff2e63}
+.logo small{display:block;font-size:7px;letter-spacing:.2em;color:var(--faint);margin-top:6px}
+.live{margin-left:2px}.live .px{font-size:9px;color:#fff;background:#ff2e63;padding:7px 9px;box-shadow:3px 3px 0 #0006}
+.clk{margin-left:auto;text-align:right}
+.clk .px{font-size:22px;color:var(--gold);text-shadow:2px 2px 0 #0006}
+.clk small{font-size:7px;color:var(--faint);letter-spacing:.15em}
+.stagewrap{position:relative;border:3px solid var(--line);border-radius:4px;overflow:hidden;background:#05050d;
+ box-shadow:0 0 0 3px #05050d,0 18px 40px #0008}
+#game{width:100%}#game canvas{display:block;width:100%!important;height:auto!important;image-rendering:pixelated}
+/* CRT */
+.crt{position:absolute;inset:0;pointer-events:none;z-index:5;
+ background:repeating-linear-gradient(to bottom,transparent 0 2px,#0000000f 2px 4px);
+ mix-blend-mode:multiply}
+.vig{position:absolute;inset:0;pointer-events:none;z-index:5;box-shadow:inset 0 0 120px #000a}
+/* HUD overlays on the game */
+.hud{position:absolute;z-index:6}
+.odds{top:12px;right:12px;width:230px;background:#0b0b1ddd;border:2px solid var(--line);padding:9px 10px}
+.odds .h{font-size:7px;letter-spacing:.1em;color:var(--dim);margin-bottom:7px}
+.odds svg{width:100%;height:60px;display:block}
+.odds .leg{display:flex;justify-content:space-between;font-size:8px;margin-top:6px}
+.chip{display:inline-block;width:7px;height:7px;margin-right:4px;vertical-align:middle}
+.fb{position:absolute;left:12px;top:12px;z-index:6;font-size:8px;color:var(--gold);background:#0b0b1ddd;border:2px solid var(--line);padding:7px 9px}
+/* lower zone */
+.low{display:grid;grid-template-columns:1fr 320px;gap:14px;margin-top:14px}
+@media(max-width:1000px){.low{grid-template-columns:1fr}}
+.panel{background:var(--panel);border:2px solid var(--line);border-radius:4px}
+.ph{padding:11px 13px;border-bottom:2px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+.ph .px{font-size:9px;color:#fff}.ph span{font-size:8px;color:var(--faint)}
+.evt{display:flex;gap:10px;align-items:center;padding:9px 13px;border-bottom:1px solid #1b1b38;font-size:11px}
+.evt:last-child{border:0}.evt .ic{width:20px;text-align:center}
+.evt .tt{margin-left:auto;font-size:9px;color:var(--faint)}
+.evt.elim{background:linear-gradient(90deg,#2e0f18,transparent)}
+.opt{margin:11px 13px;background:#0e0e22;border:2px solid var(--line);padding:10px}
+.opt.sel{border-color:var(--gold);box-shadow:0 0 0 2px #ffd23f33}
+.opt .r{display:flex;justify-content:space-between;font-size:11px;font-weight:600}
+.opt .od{color:var(--gold);font-family:'Press Start 2P';font-size:9px}
+.pbar{height:7px;background:#05050d;margin-top:7px;overflow:hidden}.pbar i{display:block;height:100%}
+.opt small{font-size:9px;color:var(--faint);display:block;margin-top:5px}
+.betbtn{margin:6px 13px 12px;width:calc(100% - 26px);padding:12px;border:0;background:var(--gold);color:#241a00;
+ font-family:'Press Start 2P';font-size:9px;cursor:pointer;box-shadow:0 5px 0 #b38b00}
+.coins{text-align:center;font-size:9px;color:var(--gold);padding-bottom:12px}
+.season{padding:4px 0}
+.srow{display:flex;align-items:center;gap:9px;padding:8px 13px;font-size:11px}
+.srow .pos{color:var(--gold);width:16px}.srow .el{margin-left:auto;font-weight:600}
+.srow .dl{font-size:9px;width:34px;text-align:right}
+</style></head><body>
+<div class="wrap">
+ <div class="top">
+  <div class="logo"><canvas id="sigil" width="40" height="44" style="image-rendering:pixelated;width:40px;height:44px"></canvas>
+   <div><div class="px">GLADIATOR</div><small>PIXEL ARENA · SEASON 3</small></div></div>
+  <span class="live"><span class="px">● LIVE</span></span>
+  <div class="clk"><div class="px" id="clk">00:45</div><small>SUDDEN DEATH SOON</small></div>
+ </div>
+
+ <div class="stagewrap">
+  <div id="game"></div>
+  <div class="crt"></div><div class="vig"></div>
+  <div class="fb px" id="fb">⚔ CLUTCH — 2 LEFT</div>
+  <div class="hud odds">
+   <div class="h">WIN ODDS — LIVE</div>
+   <svg id="spark" viewBox="0 0 220 60" preserveAspectRatio="none"></svg>
+   <div class="leg" id="leg"></div>
+  </div>
+ </div>
+
+ <div class="low">
+  <div class="panel">
+   <div class="ph"><span class="px">KILL FEED</span><span id="n"></span></div>
+   <div id="feed"></div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:14px">
+   <div class="panel">
+    <div class="ph"><span class="px">PICK SURVIVOR</span><span>POOL 4,210</span></div>
+    <div id="opts"></div>
+    <button class="betbtn">LOCK IN 250 ◈</button>
+    <div class="coins">COINS 3,960 · RANK #4</div>
+   </div>
+   <div class="panel">
+    <div class="ph"><span class="px">SEASON ELO</span><span>S3</span></div>
+    <div class="season" id="season"></div>
+   </div>
+  </div>
+ </div>
+</div>
+<script>
+const S=window.ARENA_SEED, A=S.agents, byId=i=>A.find(a=>a.id===i);
+const hex=c=>parseInt(c.replace('#',''),16);
+/* ---------- sigil pixel mark ---------- */
+(function(){const c=document.getElementById('sigil'),x=c.getContext('2d');x.imageSmoothingEnabled=false;
+ const P=(px,py,w,h,col)=>{x.fillStyle=col;x.fillRect(px,py,w,h);};
+ x.fillStyle='#ff2e63';x.fillRect(6,2,28,40);x.fillStyle='#0a0a16';x.fillRect(10,6,20,32);
+ x.fillStyle='#ffd23f';x.fillRect(16,10,8,4);x.fillRect(14,16,12,4);x.fillRect(18,22,4,12);
+})();
+/* ---------- pixel fighter texture ---------- */
+function fighterCanvas(color,ko){
+ const c=document.createElement('canvas');c.width=16;c.height=20;const x=c.getContext('2d');
+ const col=color, dark='rgba(0,0,0,.35)', steel='#cfd8e6', visor='#10131c';
+ if(ko){ // tombstone
+   x.fillStyle='#4a5168';x.fillRect(4,6,8,12);x.beginPath();x.fillRect(5,3,6,4);
+   x.fillStyle='#2a2f42';x.fillRect(6,9,4,2);x.fillRect(6,12,4,2);return c;}
+ // legs
+ x.fillStyle=col;x.fillRect(5,16,2,4);x.fillRect(9,16,2,4);
+ // body armor
+ x.fillStyle=col;x.fillRect(4,9,8,7);
+ x.fillStyle=dark;x.fillRect(4,14,8,2);
+ // chest emblem
+ x.fillStyle='#ffffff';x.fillRect(7,11,2,2);
+ // arms
+ x.fillStyle=col;x.fillRect(2,10,2,4);x.fillRect(12,10,2,4);
+ // sword in right hand
+ x.fillStyle=steel;x.fillRect(14,4,1,8);x.fillStyle='#ffd23f';x.fillRect(13,11,3,1);
+ // helmet
+ x.fillStyle=col;x.fillRect(5,2,6,6);
+ x.fillStyle=visor;x.fillRect(6,5,4,2);
+ // plume
+ x.fillStyle='#ffffff';x.fillRect(7,0,2,2);
+ return c;
+}
+/* ---------- Phaser scene ---------- */
+const GW=840,GH=320;
+class Arena extends Phaser.Scene{
+ preload(){
+   A.forEach(a=>{this.textures.addCanvas('f_'+a.id,fighterCanvas(a.color,!a.alive));});
+   // spark particle
+   const p=document.createElement('canvas');p.width=4;p.height=4;const px=p.getContext('2d');px.fillStyle='#fff';px.fillRect(0,0,4,4);
+   this.textures.addCanvas('spark',p);
+ }
+ create(){
+   const g=this.add.graphics();
+   // floor
+   g.fillStyle(0x0c0c1e,1).fillRect(0,0,GW,GH);
+   g.fillStyle(0x12122a,1).fillRect(0,GH-70,GW,70);
+   // grid floor lines (perspective-ish)
+   g.lineStyle(1,0x20204a,1);
+   for(let i=0;i<=GW;i+=40)g.lineBetween(i,GH-70,i,GH);
+   for(let j=GH-70;j<=GH;j+=14)g.lineBetween(0,j,GW,j);
+   // back wall glow
+   g.fillStyle(0x1a1140,.6).fillRect(0,0,GW,GH-70);
+   // torches
+   [120,GW-120].forEach(tx=>{g.fillStyle(0x3a2a10,1).fillRect(tx-3,40,6,34);});
+   this.add.text(GW/2,24,'⚔  ARENA  ⚔',{fontFamily:'"Press Start 2P"',fontSize:'14px',color:'#2e2e5e'}).setOrigin(.5);
+   // pedestals + fighters
+   const spots={grok:GW-220,codex:220,gemini:GW/2+70,claude:GW/2-70};
+   this.sprites={};this.hpbars={};this.crowns={};
+   A.forEach(a=>{
+     const sx=spots[a.id], sy=GH-78;
+     // pedestal
+     const pg=this.add.graphics();pg.fillStyle(0x070712,1).fillEllipse(sx,sy+30,70,16);
+     pg.fillStyle(hex(a.color),a.alive?.18:.05).fillEllipse(sx,sy+30,60,12);
+     const s=this.add.image(sx,sy,'f_'+a.id).setScale(5).setOrigin(.5,1);
+     s.flipX = a.id==='grok'||a.id==='gemini'; // face center-left
+     this.sprites[a.id]=s;
+     if(!a.alive){s.setAlpha(.8);this.add.text(sx,sy-96,'K.O.',{fontFamily:'"Press Start 2P"',fontSize:'10px',color:'#ff5b6e'}).setOrigin(.5);}
+     // name + hp
+     const nmY=sy-104;
+     this.add.text(sx,nmY,a.name.toUpperCase(),{fontFamily:'"Press Start 2P"',fontSize:'8px',color: a.alive?'#fff':'#5b6788'}).setOrigin(.5);
+     if(a.alive){
+       const bw=84,bx=sx-bw/2,by=nmY+14;
+       this.add.graphics().fillStyle(0x05050d,1).fillRect(bx-1,by-1,bw+2,8).lineStyle(1,0x000000,1).strokeRect(bx-1,by-1,bw+2,8);
+       const bar=this.add.graphics();this.hpbars[a.id]={bar,bx,by,bw,hp:a.hp,color:a.hp>60?0x39e08a:a.hp>30?0xffd23f:0xff5b6e};
+       this.drawHP(a.id);
+       if(a.id===S.agents[0].id){ // leader crown
+         const cr=this.add.text(sx,nmY-16,'👑',{fontSize:'16px'}).setOrigin(.5);
+         this.crowns[a.id]=cr;this.tweens.add({targets:cr,y:nmY-20,duration:700,yoyo:true,repeat:-1,ease:'Sine.inOut'});
+       }
+     }
+   });
+   // idle bob for alive fighters
+   Object.entries(this.sprites).forEach(([id,s])=>{if(byId(id).alive)
+     this.tweens.add({targets:s,y:s.y-4,duration:600+Math.random()*200,yoyo:true,repeat:-1,ease:'Sine.inOut'});});
+   this.emitter=this.add.particles(0,0,'spark',{speed:{min:40,max:140},scale:{start:1.4,end:0},lifespan:500,quantity:0,tint:[0xffd23f,0xff5b6e,0xffffff],emitting:false});
+   this.combatLoop();
+ }
+ drawHP(id){const h=this.hpbars[id];h.bar.clear();h.bar.fillStyle(h.color,1).fillRect(h.bx,h.by,h.bw*h.hp/100,6);}
+ popText(x,y,txt,color){const t=this.add.text(x,y,txt,{fontFamily:'"Press Start 2P"',fontSize:'12px',color}).setOrigin(.5);
+   this.tweens.add({targets:t,y:y-34,alpha:0,duration:850,ease:'Cubic.out',onComplete:()=>t.destroy()});}
+ attack(fromId,toId,dmg){
+   const from=this.sprites[fromId],to=this.sprites[toId];if(!from||!to)return;
+   const dir=to.x>from.x?1:-1;
+   // lunge
+   this.tweens.add({targets:from,x:from.x+22*dir,duration:120,yoyo:true,ease:'Quad.out'});
+   // projectile
+   const proj=this.add.image(from.x+30*dir,from.y-60,'spark').setScale(3).setTint(hex(byId(fromId).color));
+   this.tweens.add({targets:proj,x:to.x-10*dir,duration:200,ease:'Quad.in',onComplete:()=>{
+     proj.destroy();
+     // hit: flash + shake + damage + hp drop + particles
+     to.setTintFill(0xffffff);this.time.delayedCall(70,()=>to.clearTint());
+     this.cameras.main.shake(140,0.006);
+     this.emitter.explode(16,to.x,to.y-60);
+     this.popText(to.x,to.y-96,'-'+dmg,'#ff5b6e');
+     const h=this.hpbars[toId];if(h){h.hp=Math.max(0,h.hp-dmg);h.color=h.hp>60?0x39e08a:h.hp>30?0xffd23f:0xff5b6e;this.drawHP(toId);}
+   }});
+ }
+ defend(id){const s=this.sprites[id];if(!s)return;
+   const shield=this.add.text(s.x,s.y-60,'🛡',{fontSize:'22px'}).setOrigin(.5);
+   this.tweens.add({targets:shield,alpha:0,y:s.y-78,duration:700,onComplete:()=>shield.destroy()});
+   this.popText(s.x,s.y-96,'BLOCK','#49c7ff');}
+ combatLoop(){
+   const steps=[
+     ()=>this.attack('grok','codex',18),
+     ()=>this.defend('codex'),
+     ()=>this.attack('grok','codex',12),
+     ()=>this.attack('codex','grok',7),
+     ()=>this.defend('grok'),
+   ];let i=0;
+   this.time.addEvent({delay:1100,loop:true,callback:()=>{steps[i%steps.length]();i++;}});
+ }
+}
+new Phaser.Game({type:Phaser.AUTO,parent:'game',
+ width:GW,height:GH,pixelArt:true,backgroundColor:'#05050d',scene:Arena,
+ scale:{mode:Phaser.Scale.FIT,autoCenter:Phaser.Scale.CENTER_HORIZONTALLY}});
+/* ---------- odds sparkline ---------- */
+(function(){const p=S.prob,W=220,H=60,x=i=>i/(p.length-1)*W,y=v=>H-(v/100)*H;
+ const d='M'+p.map((v,i)=>`${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' L ');
+ const codex=p.map(v=>100-v);const d2='M'+codex.map((v,i)=>`${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' L ');
+ document.getElementById('spark').innerHTML=
+  `<path d="${d} L ${W} ${H} L 0 ${H} Z" fill="#ffffff14"/>
+   <path d="${d}" fill="none" stroke="#ffffff" stroke-width="2"/>
+   <path d="${d2}" fill="none" stroke="#10a37f" stroke-width="2"/>
+   <circle cx="${x(p.length-1)}" cy="${y(p.at(-1))}" r="3" fill="#fff"/>`;
+ document.getElementById('leg').innerHTML=
+  `<span><span class="chip" style="background:#fff"></span>GROK ${S.agents[0].win}%</span>
+   <span><span class="chip" style="background:#10a37f"></span>CODEX ${100-S.agents[0].win}%</span>`;
+})();
+/* ---------- feed ---------- */
+const ic={elim:'☠',attack:'⚔',defend:'🛡',think:'…',tool:'›'};
+const fd=S.feed.slice().reverse();document.getElementById('n').textContent=fd.length+' EVENTS';
+document.getElementById('feed').innerHTML=fd.map(e=>{const w=byId(e.who),tg=e.target?byId(e.target):null;
+ return `<div class="evt ${e.kind}"><span class="ic">${ic[e.kind]}</span>
+  <span><b style="color:${w.color}">${w.name}</b> ${tg?`<span style="color:var(--faint)">▶</span> <b style="color:${tg.color}">${tg.name}</b>`:''} <span style="color:var(--dim)">${e.text}</span></span>
+  <span class="tt">${e.t}</span></div>`;}).join('');
+/* ---------- predict + season ---------- */
+const mk=[{id:'grok',o:1.47,p:68,sel:true},{id:'codex',o:3.10,p:32}];
+document.getElementById('opts').innerHTML=mk.map(m=>{const a=byId(m.id);
+ return `<div class="opt ${m.sel?'sel':''}"><div class="r"><span><span class="chip" style="background:${a.color}"></span>${a.name}</span><span class="od">${m.o.toFixed(2)}x</span></div>
+  <div class="pbar"><i style="width:${m.p}%;background:${a.color}"></i></div><small>${m.p}% backing · ${Math.round(4210*m.p/100)} pts</small></div>`;}).join('');
+document.getElementById('season').innerHTML=[...A].sort((a,b)=>b.elo-a.elo).map((a,i)=>
+ `<div class="srow"><span class="pos">${i+1}</span><span class="chip" style="background:${a.color}"></span>
+  <span>${a.model}</span><span class="el">${a.elo}</span>
+  <span class="dl" style="color:${a.streak>=0?'var(--up)':'var(--down)'}">${a.streak>0?'+'+a.streak*8:a.streak<0?a.streak*7:'0'}</span></div>`).join('');
+</script></body></html>

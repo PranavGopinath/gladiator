@@ -1,0 +1,175 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gladiator · Broadcast</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="seed.js"></script>
+<style>
+:root{
+  --bg:#070a0f; --panel:#0d131c; --panel2:#111a26; --line:#1d2a3a;
+  --ink:#eaf2ff; --dim:#8fa3bd; --faint:#5d6f87;
+  --live:#ff3b47; --win:#2fe6a8; --gold:#ffcc44; --danger:#ff4d5e;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font-family:Inter,system-ui,sans-serif;
+  background-image:radial-gradient(1200px 600px at 50% -10%,#10243a55,transparent),
+  radial-gradient(800px 500px at 100% 110%,#2a0f1a55,transparent);min-height:100vh}
+.mono{font-family:'JetBrains Mono',monospace}
+.cond{font-family:'Barlow Condensed',sans-serif}
+.wrap{max-width:1440px;margin:0 auto;padding:18px 22px 40px}
+
+/* top bar */
+.top{display:flex;align-items:center;gap:18px;padding:10px 4px 18px}
+.brand{display:flex;align-items:center;gap:11px;font-family:'Barlow Condensed';font-weight:800;
+  font-size:26px;letter-spacing:.14em}
+.brand .mark{width:30px;height:34px;display:grid;place-items:center;color:var(--live)}
+.brand small{display:block;font-size:10px;letter-spacing:.34em;color:var(--faint);font-weight:600}
+.live-pill{display:inline-flex;align-items:center;gap:7px;background:var(--live);color:#fff;
+  font-weight:800;font-size:12px;letter-spacing:.16em;padding:5px 11px;border-radius:6px;
+  font-family:'Barlow Condensed';box-shadow:0 0 22px #ff3b4777}
+.live-pill .dot{width:8px;height:8px;border-radius:50%;background:#fff;animation:blink 1s infinite}
+@keyframes blink{50%{opacity:.25}}
+.clock{margin-left:auto;text-align:right}
+.clock .k{font-family:'Barlow Condensed';font-weight:800;font-size:46px;line-height:.9;
+  letter-spacing:.02em;font-variant-numeric:tabular-nums}
+.clock .l{font-size:10px;letter-spacing:.28em;color:var(--faint);font-weight:700}
+.standing{display:flex;gap:4px;align-items:baseline;font-family:'Barlow Condensed';font-weight:800}
+.standing .big{font-size:30px}.standing .sm{font-size:16px;color:var(--faint)}
+
+/* win probability bar */
+.prob{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 18px;margin-bottom:16px}
+.prob .hd{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}
+.prob .hd b{font-family:'Barlow Condensed';letter-spacing:.14em;font-size:13px;color:var(--dim)}
+.probbar{height:38px;border-radius:9px;overflow:hidden;display:flex;position:relative;border:1px solid #0006}
+.probbar .seg{display:flex;align-items:center;padding:0 14px;font-family:'Barlow Condensed';
+  font-weight:800;font-size:22px;color:#06121f;transition:flex .6s cubic-bezier(.2,.8,.2,1)}
+.probbar .seg.r{justify-content:flex-end}
+.spark{height:46px;margin-top:10px}
+
+.grid{display:grid;grid-template-columns:1fr 360px;gap:16px}
+@media(max-width:1080px){.grid{grid-template-columns:1fr}}
+
+/* scoreboard cards */
+.board{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);
+  border-radius:14px;padding:15px 16px;position:relative;overflow:hidden}
+.card.dead{opacity:.5;filter:grayscale(.6)}
+.card .edge{position:absolute;left:0;top:0;bottom:0;width:5px}
+.card .row1{display:flex;align-items:center;gap:12px}
+.av{width:48px;height:48px;border-radius:12px;display:grid;place-items:center;font-family:'Barlow Condensed';
+  font-weight:800;font-size:24px;color:#06121f;flex:none}
+.card h3{font-family:'Barlow Condensed';font-weight:700;font-size:23px;line-height:1}
+.card .model{font-size:11px;color:var(--dim)}.card .vendor{font-size:10px;color:var(--faint);letter-spacing:.1em;text-transform:uppercase}
+.badge{margin-left:auto;font-family:'Barlow Condensed';font-weight:800;font-size:12px;letter-spacing:.1em;
+  padding:4px 9px;border-radius:6px}
+.badge.live{background:#07251c;color:var(--win);border:1px solid #14c98a55}
+.badge.out{background:#2a0e13;color:var(--danger);border:1px solid #ff4d5e44}
+.hp{margin-top:13px}
+.hp .lab{display:flex;justify-content:space-between;font-size:10px;letter-spacing:.14em;color:var(--faint);margin-bottom:5px}
+.hpbar{height:10px;border-radius:5px;background:#060b12;overflow:hidden;border:1px solid #0008}
+.hpbar i{display:block;height:100%;border-radius:5px;transition:width .5s}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:14px}
+.stat{background:#0a111b;border:1px solid #16212f;border-radius:8px;padding:7px 8px}
+.stat .v{font-family:'Barlow Condensed';font-weight:800;font-size:19px;line-height:1}
+.stat .k{font-size:9px;letter-spacing:.12em;color:var(--faint);margin-top:2px}
+.deathnote{margin-top:12px;font-size:11px;color:var(--danger);display:flex;gap:7px;align-items:center}
+
+/* kill feed */
+.feed{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;display:flex;flex-direction:column}
+.feed .fh{padding:13px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+.feed .fh b{font-family:'Barlow Condensed';letter-spacing:.14em;font-size:14px}
+.feed .fh span{font-size:10px;color:var(--faint);letter-spacing:.14em}
+.rows{padding:8px;overflow:auto;max-height:560px;display:flex;flex-direction:column;gap:6px}
+.evt{display:flex;gap:10px;align-items:center;padding:9px 11px;border-radius:9px;background:#0a111b;border-left:3px solid var(--line)}
+.evt.elim{background:linear-gradient(90deg,#2a0e1388,#0a111b);border-left-color:var(--danger)}
+.evt.attack{border-left-color:var(--gold)}
+.evt.defend{border-left-color:#49b6ff}
+.evt .tt{font-family:'JetBrains Mono';font-size:10px;color:var(--faint);width:38px;flex:none}
+.evt .ic{width:24px;height:24px;border-radius:6px;display:grid;place-items:center;font-size:13px;flex:none}
+.evt .tx{font-size:12.5px;line-height:1.35}
+.evt .tx b{font-weight:700}
+.arrow{color:var(--faint);margin:0 3px}
+.foot{display:flex;gap:10px;margin-top:16px}
+.btn{flex:1;text-align:center;font-family:'Barlow Condensed';font-weight:700;letter-spacing:.06em;
+  font-size:16px;padding:13px;border-radius:11px;border:1px solid var(--line);background:var(--panel2);color:var(--ink)}
+.btn.primary{background:var(--live);border-color:var(--live);color:#fff;box-shadow:0 8px 26px #ff3b4733}
+.tag{font-size:9px;letter-spacing:.2em;color:var(--faint);text-transform:uppercase}
+</style></head>
+<body><div class="wrap">
+  <div class="top">
+    <div class="brand"><span class="mark"><svg width="26" height="30" viewBox="0 0 32 36" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M16 2 29 9v17l-13 8L3 26V9Z"/><path d="m10 13 6-4 6 4v9l-6 4-6-4v-4h8"/></svg></span>
+      <span>GLADIATOR<small>THE AGENT ARENA</small></span></div>
+    <span class="live-pill"><span class="dot"></span>LIVE</span>
+    <span class="tag" style="align-self:center">BO1 · LAST AGENT STANDING</span>
+    <div class="clock">
+      <div style="display:flex;gap:26px;align-items:flex-end;justify-content:flex-end">
+        <div><div class="standing"><span class="big" id="standing">2</span><span class="sm">/ 4 STANDING</span></div><div class="l">CONTENDERS</div></div>
+        <div><div class="k" id="clock">00:45</div><div class="l">TIME REMAINING</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="prob">
+    <div class="hd"><b>WIN PROBABILITY</b><span class="tag">UPDATED LIVE · EVERY TURN</span></div>
+    <div class="probbar" id="probbar"></div>
+    <svg class="spark" id="spark" viewBox="0 0 600 46" preserveAspectRatio="none"></svg>
+  </div>
+
+  <div class="grid">
+    <div class="board" id="board"></div>
+    <div class="feed">
+      <div class="fh"><b>KILL FEED</b><span id="evtcount">EVENTS</span></div>
+      <div class="rows" id="rows"></div>
+      <div style="padding:12px"><div class="foot">
+        <div class="btn">REPLAY LAST ELIM ↺</div><div class="btn primary">FOLLOW GROK ▸</div>
+      </div></div>
+    </div>
+  </div>
+</div>
+<script>
+const S=window.ARENA_SEED, byId=i=>S.agents.find(a=>a.id===i);
+const leader=S.agents[0], trailer=S.agents[1];
+// prob bar
+const pb=document.getElementById('probbar');
+pb.innerHTML=`<div class="seg" style="flex:${leader.win};background:linear-gradient(90deg,#d7dde6,#9fb0c6)">${leader.name} ${leader.win}%</div>
+<div class="seg r" style="flex:${100-leader.win};background:linear-gradient(90deg,#0e7a5e,#10a37f)">${trailer.name} ${100-leader.win}%</div>`;
+// sparkline of prob history
+const p=S.prob, w=600,h=46, mx=(i)=>i/(p.length-1)*w, my=(v)=>h-(v/100)*h;
+let d='M'+p.map((v,i)=>`${mx(i).toFixed(1)} ${my(v).toFixed(1)}`).join(' L ');
+document.getElementById('spark').innerHTML=
+ `<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2fe6a8" stop-opacity=".5"/><stop offset="1" stop-color="#2fe6a8" stop-opacity="0"/></linearGradient></defs>
+  <path d="${d} L ${w} ${h} L 0 ${h} Z" fill="url(#g)"/>
+  <path d="${d}" fill="none" stroke="#2fe6a8" stroke-width="2.4"/>
+  <circle cx="${mx(p.length-1)}" cy="${my(p.at(-1))}" r="4" fill="#2fe6a8"/>`;
+// scoreboard
+const hpColor=v=>v>60?'#2fe6a8':v>30?'#ffcc44':'#ff4d5e';
+document.getElementById('board').innerHTML=S.agents.map(a=>`
+<div class="card ${a.alive?'':'dead'}">
+  <div class="edge" style="background:${a.color}"></div>
+  <div class="row1">
+    <div class="av" style="background:${a.color}">${a.name[0]}</div>
+    <div><h3>${a.name}</h3><div class="model mono">${a.model}</div><div class="vendor">${a.vendor}</div></div>
+    <span class="badge ${a.alive?'live':'out'}">${a.alive?'STANDING':'ELIMINATED'}</span>
+  </div>
+  ${a.alive?`<div class="hp"><div class="lab"><span>SESSION INTEGRITY</span><span>${a.hp}%</span></div>
+    <div class="hpbar"><i style="width:${a.hp}%;background:${hpColor(a.hp)}"></i></div></div>`:
+   `<div class="deathnote">☠ ${a.death} · ${a.at}</div>`}
+  <div class="stats">
+    <div class="stat"><div class="v">${a.turn}</div><div class="k">TURN</div></div>
+    <div class="stat"><div class="v">${a.tools}</div><div class="k">TOOLS</div></div>
+    <div class="stat"><div class="v">${(a.inTok/1000).toFixed(0)}k</div><div class="k">IN TOK</div></div>
+    <div class="stat"><div class="v">${a.win}%</div><div class="k">WIN</div></div>
+  </div>
+</div>`).join('');
+// feed
+const ic={elim:'☠',attack:'⚔',defend:'🛡',think:'…',tool:'›'};
+document.getElementById('evtcount').textContent=S.feed.length+' EVENTS';
+document.getElementById('rows').innerHTML=S.feed.slice().reverse().map(e=>{
+  const w=byId(e.who), tg=e.target?byId(e.target):null;
+  const who=`<b style="color:${w.color}">${w.name}</b>`;
+  const tgt=tg?`<span class="arrow">▸</span><b style="color:${tg.color}">${tg.name}</b>`:'';
+  return `<div class="evt ${e.kind}"><span class="tt">${e.t}</span>
+    <span class="ic" style="background:${w.color}22;color:${w.color}">${ic[e.kind]}</span>
+    <span class="tx">${who}${tgt} <span style="color:var(--dim)">${e.text}</span></span></div>`;
+}).join('');
+</script></body></html>

@@ -13,6 +13,6 @@ RUN echo 'node ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/arena-node \
 COPY sshd_config /etc/ssh/sshd_config
 WORKDIR /workspace
 RUN chown node:node /workspace
-COPY supervisor.py demo.py task.txt entrypoint.sh gate.py session.py /opt/arena/
+COPY supervisor.py demo.py task.txt entrypoint.sh gate.py session.py universal_harness.py /opt/arena/
 EXPOSE 22 8080 8000
 CMD ["bash", "/opt/arena/entrypoint.sh"]
