@@ -154,22 +154,6 @@ class JevTests(unittest.TestCase):
         self.assertEqual(updates[0]['status'], 'live')
         self.assertEqual(updates[0]['event_seq'], 4)
 
-    def test_change_signal_reevaluates_without_waiting_for_the_heartbeat(self):
-        state = snapshot(); finished = threading.Event(); changed = threading.Event(); calls = []
-        class FakeClient:
-            def evaluate(self, snap, context):
-                calls.append(time.monotonic())
-                if len(calls) >= 3:
-                    finished.set()
-                else:
-                    changed.set()  # more log activity: next pass must wake at once
-                return parse_response(response(snap), snap)
-        start = time.monotonic()
-        run_forecasts(lambda: state, lambda value, basis: None, finished, FakeClient,
-                      interval=.01, changed=changed, heartbeat=30, debounce=0)
-        self.assertGreaterEqual(len(calls), 3)
-        self.assertLess(time.monotonic() - start, 5)  # did not sleep the 30s heartbeat between calls
-
     def test_auth_failure_disables_worker_without_retrying(self):
         updates = []
         class FakeClient:
@@ -178,6 +162,32 @@ class JevTests(unittest.TestCase):
         run_forecasts(snapshot, lambda value, basis: updates.append(value), threading.Event(), FakeClient, interval=.01)
         self.assertEqual(len(updates), 1)
         self.assertEqual(updates[0]['status'], 'disabled')
+
+    def test_actions_trigger_early_coalesced_updates_with_quiet_fallback(self):
+        clock = [0.0]
+        calls = []
+        class Finished:
+            def is_set(self):
+                return len(calls) >= 3
+            def wait(self, seconds):
+                clock[0] += seconds
+                if clock[0] > 10:
+                    raise AssertionError('Worker failed to evaluate')
+        def current():
+            state = snapshot()
+            state['events'] = []
+            for seq, when, kind in [(1, 0, 'system'), (2, .5, 'tool'), (3, .75, 'message'), (4, 1, 'tool')]:
+                if clock[0] >= when:
+                    state['events'].append({'seq': seq, 'time': when, 'kind': kind,
+                                            'player': 'agent-1', 'text': 'fixture'})
+            return state
+        class FakeClient:
+            def evaluate(self, state, context):
+                calls.append(clock[0])
+                return parse_response(response(state), state)
+        with patch('jev.time.monotonic', side_effect=lambda: clock[0]):
+            run_forecasts(current, lambda *_: None, Finished(), FakeClient)
+        self.assertEqual(calls, [.5, 1.5, 6.5])
 
     def test_referee_final_and_canceled_outcomes_are_distinct_from_predictions(self):
         state = snapshot(); state.update(outcome='winner', winner='agent-2')

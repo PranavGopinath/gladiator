@@ -16,8 +16,7 @@ from urllib.parse import urlsplit, parse_qs
 
 from arena_config import default_config, validate_config, compose_config, check_credentials
 from arena_telemetry import consume, resource_sample
-from jev import (JevClient, run_forecasts, interval_seconds, terminal_prediction,
-                 heartbeat_seconds, debounce_seconds)
+from jev import JevClient, run_forecasts, interval_seconds, terminal_prediction
 from arena_attribution import explain_elimination
 from ledger import Ledger, LedgerError
 from market import Market, MarketError, DRAW
@@ -36,7 +35,6 @@ MARKET.recover('Dashboard restarted before the match was settled')
 CONTROL = secrets.token_urlsafe(24)
 LOCK = threading.RLock()
 STOP = threading.Event()
-CHANGED = threading.Event()  # Set on every new log event; wakes the Jev forecaster.
 ACTIVE = ('preparing', 'running', 'finishing')
 KERNEL = None
 STATE = {'phase': 'idle', 'result': None, 'started_at': None, 'ended_at': None,
@@ -171,7 +169,6 @@ def event(player, kind, text, data=None):
                'kind': kind, 'text': clean(text), 'data': sanitized(data or {})}
         STATE['events'].append(row)
         STATE['events'] = STATE['events'][-1500:]
-        CHANGED.set()
         match_id = STATE['match_id']
         if match_id:
             with (RUNS / (match_id + '.jsonl')).open('a') as output:
@@ -414,7 +411,7 @@ def forecast_match(finished, identity):
                 STATE['prediction'] = sanitized(update)
                 STATE['prediction_history'].append({field: update[field] for field in
                     ('updated_at', 'as_of', 'probabilities', 'confidence', 'event_seq')})
-                STATE['prediction_history'] = STATE['prediction_history'][-120:]
+                STATE['prediction_history'] = STATE['prediction_history'][-3601:]
             else:
                 STATE['prediction'] = {**(STATE.get('prediction') or {}), **update}
             with (RUNS / (identity + '.predictions.jsonl')).open('a') as output:
@@ -425,8 +422,7 @@ def forecast_match(finished, identity):
         publish({'status': 'disabled', 'message': 'Jev forecasts disabled by JEV_ENABLED=0'}, None)
         return
     run_forecasts(snapshot, publish, finished,
-                  lambda: JevClient.from_environment(ROOT / '.env'), interval_seconds(),
-                  changed=CHANGED, heartbeat=heartbeat_seconds(), debounce=debounce_seconds())
+                  lambda: JevClient.from_environment(ROOT / '.env'), interval_seconds())
 
 
 def finalize_forecast():

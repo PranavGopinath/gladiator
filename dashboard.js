@@ -1,6 +1,6 @@
 'use strict';
 const $ = id => document.getElementById(id);
-const controlToken = document.querySelector('meta[name="arena-control"]').content;
+let controlToken = document.querySelector('meta[name="arena-control"]').content;
 const palette = ['#bff574', '#eeab88', '#9eacff', '#76d8e0', '#e8a1ef'];
 const activePhases = ['preparing', 'running', 'finishing'];
 let config = null, providers = {}, latest = null, events = [], selected = null, ready = false, connected = false, busy = false;
@@ -268,7 +268,39 @@ function tick() {
   const elapsed = latest?.started_at ? (latest.ended_at || Date.now() / 1000) - latest.started_at : 0;
   $('clock').textContent = duration(limit - elapsed);
 }
+const chartColors=['#b9efc9','#f5b88f','#96bcff','#d7a7f2','#9daaa7'];
+let chartMatch=null,chartSelected=null;
+function svgNode(tag,attrs={},value){const n=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const [key,v] of Object.entries(attrs))n.setAttribute(key,v);if(value!==undefined)n.textContent=value;return n}
+function renderForecastChart(s){
+ const chart=$('forecast-chart'),legend=$('chart-legend'),slider=$('chart-scrubber'),detail=$('chart-detail');
+ const history=(s.prediction_history||[]).filter(p=>Number.isFinite(p.updated_at)&&p.probabilities).slice().sort((a,b)=>a.updated_at-b.updated_at);
+ if(chartMatch!==s.match_id){chartMatch=s.match_id;chartSelected=null}
+ chart.replaceChildren();legend.replaceChildren();
+ const ids=[...new Set(history.flatMap(p=>Object.keys(p.probabilities)))];
+ for(const [i,id] of ids.entries()){const label=node('span',s.players[id]?.name||id);const dot=document.createElement('i');dot.style.background=chartColors[i%chartColors.length];label.prepend(dot);legend.append(label)}
+ const start=s.started_at||history[0]?.updated_at||0;
+ const end=s.ended_at||(s.phase==='running'?Date.now()/1000:history.at(-1)?.updated_at)||start+1;
+ const span=Math.max(10,end-start),x=t=>55+Math.max(0,t-start)/span*865,y=p=>210-p*185;
+ for(const pct of [0,25,50,75,100]){chart.append(svgNode('line',{x1:55,x2:920,y1:y(pct/100),y2:y(pct/100),stroke:'#2c3434','stroke-dasharray':'3 5'}),svgNode('text',{x:43,y:y(pct/100)+4,fill:'#9daaa7','font-size':11,'text-anchor':'end'},pct+'%'))}
+ for(let i=0;i<=4;i++){const elapsed=span*i/4;chart.append(svgNode('text',{x:x(start+elapsed),y:238,fill:'#9daaa7','font-size':11,'text-anchor':'middle'},duration(elapsed)))}
+ for(const [i,id] of ids.entries()){
+  const samples=history.filter(p=>Number.isFinite(p.probabilities[id])),color=chartColors[i%chartColors.length];
+  let path='';for(const [j,p] of samples.entries()){path+=j?' H '+x(p.updated_at)+' V '+y(p.probabilities[id]):'M '+x(p.updated_at)+' '+y(p.probabilities[id])}
+  chart.append(svgNode('path',{d:path,fill:'none',stroke:color,'stroke-width':2.5,'data-agent':id}));
+  for(const p of samples){const dot=svgNode('circle',{cx:x(p.updated_at),cy:y(p.probabilities[id]),r:3,fill:color});dot.append(svgNode('title',{},(s.players[id]?.name||id)+' '+(p.probabilities[id]*100).toFixed(1)+'% · '+stamp(p.updated_at)));chart.append(dot)}
+ }
+ if(s.ended_at){chart.append(svgNode('line',{x1:x(s.ended_at),x2:x(s.ended_at),y1:25,y2:210,stroke:'#9daaa7','stroke-dasharray':'4 4'}))}
+ slider.hidden=history.length===0;slider.max=String(Math.max(0,history.length-1));
+ if(!history.length){detail.textContent=s.ended_at?'No Jev estimates were recorded for this match.':'Waiting for agent activity and the first Jev estimate.';chart.onpointermove=null;return}
+ const cursor=svgNode('line',{y1:25,y2:210,stroke:'#edf2ef','stroke-opacity':.4});chart.append(cursor);
+ function inspect(index){const p=history[index];slider.value=String(index);cursor.setAttribute('x1',x(p.updated_at));cursor.setAttribute('x2',x(p.updated_at));detail.textContent=stamp(p.updated_at)+' · '+ids.filter(id=>Number.isFinite(p.probabilities[id])).map(id=>(s.players[id]?.name||id)+' '+(p.probabilities[id]*100).toFixed(1)+'%').join(' / ')+' · Evidence through event '+(p.event_seq??'—')+(p.as_of?' at '+stamp(p.as_of):'')}
+ inspect(chartSelected===null?history.length-1:Math.min(chartSelected,history.length-1));
+ slider.oninput=()=>{chartSelected=Number(slider.value);inspect(chartSelected)};
+ chart.onpointermove=e=>{const rect=chart.getBoundingClientRect();if(!rect.width)return;const t=start+((e.clientX-rect.left)*960/rect.width-55)/865*span;let nearest=0;history.forEach((p,i)=>{if(Math.abs(p.updated_at-t)<Math.abs(history[nearest].updated_at-t))nearest=i});chartSelected=nearest;inspect(nearest)};
+ chart.onpointerleave=()=>{chartSelected=null;inspect(history.length-1)};
+}
 function renderPrediction() {
+  renderForecastChart(latest || {players: {}});
   const prediction = latest?.prediction || {};
   const key = JSON.stringify([prediction, latest?.match_id, playersForView().map(p => [p.id, p.name, p.state])]);
   if (key === renderedPrediction) return;
@@ -328,8 +360,17 @@ function render() {
   tick(); renderKernelObserver(); renderArena(); renderObservation(); renderPlayFeed(); renderPrediction(); updateControls();
 }
 async function jsonRequest(url, options) {
-  const response = await fetch(url, options);
-  const data = await response.json();
+  let response = await fetch(url, options);
+  let data = await response.json();
+  if (response.status === 403 && data.error === 'Invalid control token' && options?.headers?.['X-Arena-Control']) {
+    const page = await fetch('/', {cache: 'no-store'});
+    if (!page.ok) throw new Error('Cannot refresh dashboard session. Reload the page.');
+    const fresh = new DOMParser().parseFromString(await page.text(), 'text/html').querySelector('meta[name="arena-control"]')?.content;
+    if (!fresh) throw new Error('Dashboard session changed. Reload the page.');
+    controlToken = fresh;
+    response = await fetch(url, {...options, headers: {...options.headers, 'X-Arena-Control': fresh}});
+    data = await response.json();
+  }
   if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
   return data;
 }

@@ -53,7 +53,10 @@ when a live match starts, stays in the evaluator, and is never passed to
 contestants or returned by the dashboard. The integration uses TypeSafe's
 `POST https://api.typesafe.ai/v1/systemone` endpoint with `jev-latest`.
 
-A separate worker evaluates the structured agent logs every five seconds.
+A separate worker evaluates new tool calls, results, messages, and errors,
+coalescing bursts to at most one request per second with only one request in flight.
+A five-second fallback reevaluates quiet periods as the clock advances. The first
+request waits for contestant activity instead of scoring an empty starting state.
 Each contestant gets an equally bounded recent-event window and counts of
 earlier activity. Commands, results, messages, and errors are the primary
 evidence; host-observed survival and time remaining are authoritative. Log
@@ -64,11 +67,15 @@ typed assessments of recent strategy, near-term danger, and evidence of useful
 progress. These are model estimates, not verified facts or calibrated arena
 odds. Jev does not generate explanatory prose. Its judgments never determine
 elimination or the winner. Eliminations invalidate stale forecasts; the final
-display switches to the referee's actual result.
+display shows the referee's actual result separately from the forecast chart.
 
 Forecasts and final outcomes are saved separately in
 `.runs/<match-id>.predictions.jsonl` and can be downloaded from the dashboard.
-The latest 120 forecasts also accompany the state snapshot for later analysis.
+Up to 3,601 forecasts accompany the state snapshot, covering a full one-hour match
+at the maximum evaluation rate.
+An interactive step chart plots returned estimates at their receipt times; hover
+or use the keyboard-accessible slider to inspect odds and evidence timestamps.
+The chart never interpolates new estimates or appends a referee result as a forecast.
 API failures show an unavailable status with bounded backoff; invalid keys or
 missing credits disable the evaluator while the match continues normally.
 
