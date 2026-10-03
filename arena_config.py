@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parent
 def default_config():
     return {'duration_seconds': 300, 'turn_interval_seconds': 15,
             'prompt': (ROOT / 'arena-prompt.txt').read_text(),
-            'players': [{'name': 'Codex', 'harness': 'codex', 'model': os.getenv('CODEX_MODEL', '')},
-                        {'name': 'Claude', 'harness': 'claude', 'model': os.getenv('CLAUDE_MODEL', 'sonnet')}]}
+            'players': [{'name': 'Codex', 'harness': 'codex', 'model': os.getenv('CODEX_MODEL', 'gpt-5.5')},
+                        {'name': 'Claude', 'harness': 'claude', 'model': os.getenv('CLAUDE_MODEL', 'claude-opus-4-8')}]}
 
 
 def validate_config(value):

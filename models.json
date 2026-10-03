@@ -1,7 +1,7 @@
 {
   "codex": {
     "label": "Codex / OpenAI",
-    "default": "",
+    "default": "gpt-5.5",
     "source": "Local Codex account model cache",
     "models": [
       {

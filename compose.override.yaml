@@ -11,7 +11,7 @@ services:
       AGENT: codex
       CODEX_API_KEY: ""
       CODEX_AUTH_FILE: /run/secrets/codex_auth
-      MODEL: ${CODEX_MODEL:-}
+      MODEL: ${CODEX_MODEL:-gpt-5.5}
       TASK: ${CODEX_TASK:-Create /workspace/hello.txt containing exactly "Hello from Codex". Use a shell command to verify the content and then finish. Do not read environment variables or credential files.}
     secrets: [codex_auth]
     volumes:

@@ -16,6 +16,7 @@ from urllib.parse import urlsplit, parse_qs
 
 from arena_config import default_config, validate_config, compose_config, check_credentials
 from arena_telemetry import consume, resource_sample
+from jev import JevClient, run_forecasts, interval_seconds, terminal_prediction
 
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / '.runs'
@@ -25,7 +26,8 @@ LOCK = threading.RLock()
 STOP = threading.Event()
 ACTIVE = ('preparing', 'running', 'finishing')
 STATE = {'phase': 'idle', 'result': None, 'started_at': None, 'ended_at': None,
-         'limit': 300, 'match_id': None, 'players': {}, 'events': [], 'event_seq': 0, 'config': None}
+         'limit': 300, 'match_id': None, 'players': {}, 'events': [], 'event_seq': 0, 'config': None,
+         'outcome': None, 'winner': None, 'prediction': None, 'prediction_history': []}
 LAST = RUNS / 'latest.json'
 CATALOG = json.loads((ROOT / 'models.json').read_text())
 SELECTION = RUNS / 'model-selection.json'
@@ -40,6 +42,7 @@ if LAST.exists():
         STATE['event_seq'] = max((e['seq'] for e in STATE['events']), default=0)
         if STATE['phase'] in ACTIVE:
             STATE.update(phase='interrupted', result='Dashboard restarted; previous match is not being refereed.', ended_at=time.time())
+            STATE['prediction'] = {'status': 'stopped', 'message': 'Previous match interrupted'}
     except (ValueError, OSError, TypeError):
         pass
 
@@ -220,15 +223,20 @@ def observe(player, info):
 
 def apply_observations(observations):
     with LOCK:
+        eliminated = False
         for player, observation in observations:
             info = STATE['players'][player]
             if not info['alive']:
+                eliminated = True
                 continue # Preserve the first elimination and its evidence.
             info.update(observation)
             if not info['alive']:
                 info.update(state='eliminated', activity='eliminated', death_at=time.time())
                 event('referee', 'elimination', f'{info["name"]} eliminated: {info["reason"]}', {'contestant': player})
         alive = [p for p, i in STATE['players'].items() if i['alive']]
+        if eliminated:
+            # Do not display stale probabilities for an impossible outcome.
+            STATE['prediction'] = {'status': 'waiting', 'message': 'Roster changed; awaiting a fresh forecast'}
         if len(alive) == 1:
             return STATE['players'][alive[0]]['name'] + ' wins'
         if not alive:
@@ -240,10 +248,52 @@ class MatchCanceled(Exception):
     pass
 
 
+def forecast_match(finished, identity):
+    def snapshot():
+        with LOCK:
+            return {**public_state(), 'captured_at': time.time()}
+
+    def publish(update, basis):
+        with LOCK:
+            if STATE['match_id'] != identity or STATE['phase'] != 'running' or STOP.is_set():
+                return
+            if basis is not None:
+                previous_alive = {p for p, info in basis['players'].items() if info.get('alive')}
+                current_alive = {p for p, info in STATE['players'].items() if info.get('alive')}
+                if previous_alive != current_alive:
+                    return # A response to a pre-elimination snapshot is stale.
+            if update['status'] == 'live':
+                STATE['prediction'] = sanitized(update)
+                STATE['prediction_history'].append({field: update[field] for field in
+                    ('updated_at', 'as_of', 'probabilities', 'confidence', 'event_seq')})
+                STATE['prediction_history'] = STATE['prediction_history'][-120:]
+            else:
+                STATE['prediction'] = {**(STATE.get('prediction') or {}), **update}
+            with (RUNS / (identity + '.predictions.jsonl')).open('a') as output:
+                output.write(json.dumps(sanitized({**update, 'recorded_at': time.time()})) + '\n')
+            save()
+
+    if os.environ.get('JEV_ENABLED', '1') == '0':
+        publish({'status': 'disabled', 'message': 'Jev forecasts disabled by JEV_ENABLED=0'}, None)
+        return
+    run_forecasts(snapshot, publish, finished,
+                  lambda: JevClient.from_environment(ROOT / '.env'), interval_seconds())
+
+
+def finalize_forecast():
+    """Record referee outcomes separately from earlier model forecasts."""
+    with LOCK:
+        STATE['prediction'] = terminal_prediction(STATE)
+        with (RUNS / (STATE['match_id'] + '.predictions.jsonl')).open('a') as output:
+            output.write(json.dumps({**STATE['prediction'], 'recorded_at': time.time(),
+                                     'match_id': STATE['match_id']}) + '\n')
+
+
 def match(settings):
     finished = threading.Event()
     log_threads = []
     resource_thread = None
+    forecast_thread = None
     project = 'arena-' + STATE['match_id'].lower()
     path = RUNS / (STATE['match_id'] + '.compose.json')
     compose = ['docker', 'compose', '--project-name', project, '-f', str(path)]
@@ -302,6 +352,8 @@ def match(settings):
         save()
         if STOP.wait(max(0, start - time.time())):
             raise MatchCanceled()
+        forecast_thread = threading.Thread(target=forecast_match, args=(finished, STATE['match_id']), daemon=True)
+        forecast_thread.start()
         with ThreadPoolExecutor(max_workers=len(containers)) as pool:
             while True:
                 if STOP.is_set():
@@ -318,17 +370,26 @@ def match(settings):
                 save()
                 STOP.wait(.25)
         with LOCK:
-            STATE.update(phase='finishing', result=result, ended_at=time.time())
+            survivors = [p for p, info in STATE['players'].items() if info['alive']]
+            STATE.update(phase='finishing', result=result, ended_at=time.time(),
+                         outcome='winner' if len(survivors) == 1 else 'draw',
+                         winner=survivors[0] if len(survivors) == 1 else None)
         event('referee', 'result', result)
     except MatchCanceled:
         with LOCK:
-            STATE.update(phase='finishing', result='Stopped by operator — no winner', ended_at=time.time())
+            STATE.update(phase='finishing', result='Stopped by operator — no winner', ended_at=time.time(), outcome='canceled')
         event('referee', 'result', STATE['result'])
     except Exception as exc:
         with LOCK:
-            STATE.update(phase='finishing', result=f'Match interrupted: {type(exc).__name__}', ended_at=time.time(), failure=True)
+            STATE.update(phase='finishing', result=f'Match interrupted: {type(exc).__name__}', ended_at=time.time(), failure=True, outcome='invalid')
         event('referee', 'error', str(exc) if not isinstance(exc, subprocess.CalledProcessError) else 'Docker startup/observation failed. Check the image and credential files.')
     finally:
+        try:
+            finalize_forecast()
+        except OSError:
+            # Recording failure must never prevent contestant cleanup.
+            with LOCK:
+                STATE['prediction'] = terminal_prediction(STATE)
         try:
             cleanup = command(*compose, 'stop', '-t', '2', timeout=20, check=False)
             if cleanup.returncode:
@@ -340,6 +401,8 @@ def match(settings):
             thread.join(timeout=3)
         if resource_thread:
             resource_thread.join(timeout=3)
+        if forecast_thread:
+            forecast_thread.join(timeout=5)
         with LOCK:
             STATE['phase'] = 'error' if STATE.get('failure') else 'finished'
         save()
@@ -354,6 +417,8 @@ def start_match(settings):
         STOP.clear()
         identity = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S') + '-' + secrets.token_hex(3)
         STATE.update(phase='preparing', result=None, started_at=None, ended_at=None, failure=False,
+                     outcome=None, winner=None, prediction_history=[],
+                     prediction={'status': 'waiting', 'message': 'Live forecasts start with the match'},
                      match_id=identity, limit=settings['duration_seconds'], config=settings, event_seq=0, events=[],
                      players={p['id']: {**p, 'configured_model': p['model'], 'model': None,
                         'alive': False, 'state': 'starting', 'activity': 'starting', 'container': 'pending',
@@ -362,6 +427,7 @@ def start_match(settings):
         (RUNS / (identity + '.manifest.json')).write_text(json.dumps(sanitized(settings), indent=2))
         (RUNS / (identity + '.jsonl')).touch()
         (RUNS / (identity + '.metrics.jsonl')).touch()
+        (RUNS / (identity + '.predictions.jsonl')).touch()
         save()
         threading.Thread(target=match, args=(settings,), daemon=True).start()
 
@@ -406,7 +472,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, json.dumps(state))
         elif url.path.startswith('/api/export/'):
             kind = url.path.rsplit('/', 1)[-1]
-            extensions = {'manifest': '.manifest.json', 'events': '.jsonl', 'metrics': '.metrics.jsonl', 'snapshot': '.snapshot.json'}
+            extensions = {'manifest': '.manifest.json', 'events': '.jsonl', 'metrics': '.metrics.jsonl',
+                          'snapshot': '.snapshot.json', 'predictions': '.predictions.jsonl'}
             with LOCK:
                 identity = STATE['match_id']
                 if kind not in extensions or not identity:
@@ -414,7 +481,7 @@ class Handler(BaseHTTPRequestHandler):
                 path = RUNS / (identity + extensions[kind])
                 if not path.is_file():
                     self.send(404, '{}'); return
-                self.send(200, path.read_bytes(), 'application/x-ndjson' if kind in ('events', 'metrics') else 'application/json', path.name)
+                self.send(200, path.read_bytes(), 'application/x-ndjson' if kind in ('events', 'metrics', 'predictions') else 'application/json', path.name)
         else:
             self.send(404, '{}')
 

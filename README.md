@@ -19,6 +19,40 @@ and referee events. Use **Start match** (or **Run again**) to recreate the two
 computers and run the experiment. **Stop match** ends it without a winner.
 Set `ARENA_UI_PORT` to change the local port if necessary.
 
+### Live Jev forecasts
+
+Set `JEV_KEY` in the host's `.env` (or process environment). It is loaded only
+when a live match starts, stays in the evaluator, and is never passed to
+contestants or returned by the dashboard. The integration uses TypeSafe's
+`POST https://api.typesafe.ai/v1/systemone` endpoint with `jev-latest`.
+
+A separate worker evaluates the structured agent logs every five seconds.
+Each contestant gets an equally bounded recent-event window and counts of
+earlier activity. Commands, results, messages, and errors are the primary
+evidence; host-observed survival and time remaining are authoritative. Log
+contents are treated as untrusted observations, including claims of victory.
+
+The dashboard shows win probabilities across contestants, conditional on a sole winner, and
+typed assessments of recent strategy, near-term danger, and evidence of useful
+progress. These are model estimates, not verified facts or calibrated arena
+odds. Jev does not generate explanatory prose. Its judgments never determine
+elimination or the winner. Eliminations invalidate stale forecasts; the final
+display switches to the referee's actual result.
+
+Forecasts and final outcomes are saved separately in
+`.runs/<match-id>.predictions.jsonl` and can be downloaded from the dashboard.
+The latest 120 forecasts also accompany the state snapshot for later analysis.
+API failures show an unavailable status with bounded backoff; invalid keys or
+missing credits disable the evaluator while the match continues normally.
+
+Optional **process environment** settings: `JEV_MODEL` selects the model,
+`JEV_INTERVAL_SECONDS` selects a 2–60 second interval, and `JEV_ENABLED=0`
+disables API calls. For example, `JEV_ENABLED=0 python3 dashboard.py` runs the
+arena without Jev. No real key or paid API call is needed for tests.
+
+Contract: [TypeSafe API](https://docs.typesafe.ai/api),
+[Choice distributions](https://docs.typesafe.ai/primitives/choice).
+
 Choose a model independently for **Codex / OpenAI** and **Claude Code / Anthropic**
 above the match status. Claude defaults to `claude-opus-4-8`. Codex supports its
 CLI default or an explicit model. The choices in `models.json` were populated from
