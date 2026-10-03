@@ -10,6 +10,10 @@ onto a near-certain winner.
 The market only ever prices and pays. It never decides who won: settlement is
 driven by the host-side referee outcome passed into `settle`. A Jev outage
 degrades to pool-implied pricing; it never blocks a bet or a payout.
+
+A match can run several independent markets (match winner, first blood). Each is
+its own `Market` with a `name`; the name is part of every ledger idempotency key
+so two markets on the same match never collide.
 """
 import json
 from pathlib import Path
@@ -18,7 +22,8 @@ import time
 
 PRICE_FLOOR = 0.01  # Clamp prices so a near-zero probability cannot mint huge weights.
 DRAW = 'draw'
-_PERSIST = ('match_id', 'status', 'outcomes', 'pools', 'bets', '_seq', '_result', '_rake_bps')
+NOBODY = 'nobody'  # First-blood outcome: the match ends with no elimination.
+_PERSIST = ('name', 'match_id', 'status', 'outcomes', 'pools', 'bets', '_seq', '_result', '_rake_bps')
 
 
 class MarketError(Exception):
@@ -55,14 +60,15 @@ def _apportion(total, weights):
 
 
 class Market:
-    def __init__(self, ledger, rake_bps=0, path=None):
+    def __init__(self, ledger, rake_bps=0, path=None, name='winner'):
         self._ledger = ledger
         self._lock = threading.RLock()
         self._rake_bps = rake_bps
         self._path = Path(path) if path else None
+        self.name = name
         self.match_id = None
         self.status = 'idle'          # idle | open | closed | settled | void
-        self.outcomes = []            # contestant ids + 'draw'
+        self.outcomes = []            # contestant ids + 'draw' / 'nobody'
         self.pools = {}
         self.bets = []
         self._seq = 0
@@ -86,6 +92,9 @@ class Market:
         temp.write_text(json.dumps(snapshot))
         temp.replace(self._path)
 
+    def _key(self, kind, seq):
+        return f'{self.match_id}:{self.name}:{kind}:{seq}'
+
     def recover(self, reason='Market interrupted before settlement'):
         """Called on startup: a market left open/closed by a crash can never be
         refereed, so refund every stake. Idempotent via the ledger refund keys."""
@@ -102,6 +111,7 @@ class Market:
             self.pools = {outcome: 0 for outcome in self.outcomes}
             self.bets = []
             self._seq = 0
+            self._result = None
             self.status = 'open'
             self._save()
 
@@ -123,7 +133,7 @@ class Market:
             price = price_for(outcome, prediction, self.pools)
             # Debit first: if the better lacks credits the pool is left untouched.
             self._ledger.post(user, -stake, 'bet', key=key, match_id=self.match_id,
-                              outcome=outcome, price=price)
+                              market=self.name, outcome=outcome, price=price)
             self._seq += 1
             bet = {'seq': self._seq, 'ts': time.time(), 'user': str(user), 'outcome': outcome,
                    'stake': stake, 'price': price, 'weight': stake / price, 'event_seq': event_seq}
@@ -157,7 +167,7 @@ class Market:
             # No winning stake, or no opposing side: there is nothing to win, so
             # return every stake rather than redistribute among one camp.
             if self.pools.get(winning, 0) <= 0 or len(funded) < 2:
-                return self._void('No opposing pool to settle against')
+                return self._void('No opposing pool to settle against', winning_outcome=winning)
             distributable = total - total * self._rake_bps // 10000
             weights = {bet['seq']: bet['weight'] for bet in self.bets if bet['outcome'] == winning}
             shares = _apportion(distributable, weights)
@@ -165,14 +175,13 @@ class Market:
             for bet in self.bets:
                 amount = shares.get(bet['seq'], 0)
                 if amount:
-                    self._ledger.post(bet['user'], amount, 'payout',
-                                      key=f'{self.match_id}:payout:{bet["seq"]}',
-                                      match_id=self.match_id, outcome=winning, bet_seq=bet['seq'])
+                    self._ledger.post(bet['user'], amount, 'payout', key=self._key('payout', bet['seq']),
+                                      match_id=self.match_id, market=self.name, outcome=winning, bet_seq=bet['seq'])
                     payouts[bet['user']] = payouts.get(bet['user'], 0) + amount
             self.status = 'settled'
             self._result = {'status': 'settled', 'winning_outcome': winning, 'pool': total,
                             'distributed': sum(shares.values()), 'rake': total - distributable,
-                            'payouts': payouts}
+                            'payouts': payouts, 'bet_payouts': {str(seq): amount for seq, amount in shares.items()}}
             self._save()
             return self._result
 
@@ -180,22 +189,29 @@ class Market:
         with self._lock:
             return self._void(reason)
 
-    def _void(self, reason):
+    def _void(self, reason, winning_outcome=None):
         for bet in self.bets:
-            self._ledger.post(bet['user'], bet['stake'], 'refund',
-                              key=f'{self.match_id}:refund:{bet["seq"]}',
-                              match_id=self.match_id, note=reason)
+            self._ledger.post(bet['user'], bet['stake'], 'refund', key=self._key('refund', bet['seq']),
+                              match_id=self.match_id, market=self.name, note=reason)
         self.status = 'void'
-        self._result = {'status': 'void', 'reason': reason,
+        self._result = {'status': 'void', 'reason': reason, 'winning_outcome': winning_outcome,
                         'refunded': sum(bet['stake'] for bet in self.bets)}
         self._save()
         return self._result
 
     # -- display ---------------------------------------------------------------
+    def _distributable(self):
+        total = sum(self.pools.values())
+        return total - total * self._rake_bps // 10000
+
     def quote(self, prediction=None, open_outcomes=None):
-        """Live board: pool, frozen-at-now price and decimal odds per outcome."""
+        """Live board: pool, frozen-at-now price, decimal odds and the summed
+        payout weight per outcome (so a client can project a new bet's return)."""
         with self._lock:
             total = sum(self.pools.values())
+            weights = {outcome: 0.0 for outcome in self.outcomes}
+            for bet in self.bets:
+                weights[bet['outcome']] = weights.get(bet['outcome'], 0.0) + bet['weight']
             board = {}
             for outcome in self.outcomes:
                 price = price_for(outcome, prediction, self.pools)
@@ -204,9 +220,41 @@ class Market:
                     'implied': (self.pools[outcome] / total) if total else None,
                     'price': price,
                     'odds': round(1 / price, 3),
+                    'weight': weights[outcome],
                     'open': open_outcomes is None or outcome in open_outcomes,
                 }
-            return {'match_id': self.match_id, 'status': self.status, 'total_pool': total,
-                    'rake_bps': self._rake_bps, 'outcomes': board, 'bet_count': len(self.bets)}
+            return {'name': self.name, 'match_id': self.match_id, 'status': self.status, 'total_pool': total,
+                    'distributable': self._distributable(), 'rake_bps': self._rake_bps, 'outcomes': board,
+                    'bet_count': len(self.bets), 'result': self._result}
+
+    def position(self, user):
+        """This user's bets with what each would return. While the market is open
+        the projection assumes that outcome wins and no further money arrives; once
+        settled or void it is the actual payout or refund."""
+        with self._lock:
+            user = str(user)
+            weights = {}
+            for bet in self.bets:
+                weights[bet['outcome']] = weights.get(bet['outcome'], 0.0) + bet['weight']
+            distributable = self._distributable()
+            rows = []
+            for bet in self.bets:
+                if bet['user'] != user:
+                    continue
+                row = {k: bet[k] for k in ('seq', 'ts', 'outcome', 'stake', 'price', 'weight', 'event_seq')}
+                row['market'] = self.name
+                row['odds'] = round(1 / bet['price'], 3)
+                if self.status == 'settled':
+                    row['status'] = 'won' if bet['outcome'] == self._result['winning_outcome'] else 'lost'
+                    row['returned'] = self._result['bet_payouts'].get(str(bet['seq']), 0)
+                elif self.status == 'void':
+                    row['status'] = 'refunded'
+                    row['returned'] = bet['stake']
+                else:
+                    row['status'] = 'live'
+                    mass = weights.get(bet['outcome'], 0.0)
+                    row['projected'] = int(distributable * bet['weight'] / mass) if mass else bet['stake']
+                rows.append(row)
+            return rows
 
     _result = None

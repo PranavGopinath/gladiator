@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import argparse
 import copy
 import json
 import os
@@ -19,8 +20,9 @@ from arena_telemetry import consume, resource_sample
 from jev import JevClient, run_forecasts, interval_seconds, terminal_prediction
 from arena_attribution import explain_elimination
 from ledger import Ledger, LedgerError
-from market import Market, MarketError, DRAW
+from market import Market, MarketError, DRAW, NOBODY
 from accounts import Accounts
+from betting_simulation import DemoBook
 import payments
 from arena_kernel import MatchObserver
 
@@ -28,10 +30,25 @@ ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / '.runs'
 RUNS.mkdir(exist_ok=True, mode=0o700)
 LEDGER = Ledger(RUNS / 'ledger.jsonl')
-MARKET = Market(LEDGER, rake_bps=int(os.environ.get('ARENA_RAKE_BPS', '0')), path=RUNS / 'market.json')
+RAKE_BPS = int(os.environ.get('ARENA_RAKE_BPS', '0'))
+MARKET = Market(LEDGER, rake_bps=RAKE_BPS, path=RUNS / 'market.json', name='winner')
+FIRST_BLOOD = Market(LEDGER, rake_bps=RAKE_BPS, path=RUNS / 'market-first-blood.json', name='first_blood')
+FIRST_FALLEN = Market(LEDGER, rake_bps=RAKE_BPS, path=RUNS / 'market-first-fallen.json', name='first_fallen')
+MARKETS = {'winner': MARKET, 'first_blood': FIRST_BLOOD, 'first_fallen': FIRST_FALLEN}
+SIMULATE_BETTORS = False
+DEMO_BOOK = DemoBook()
+BET_CUTOFF_SECONDS = 10
+KILL_GRACE = 3.0   # Seconds a death may stay unattributed before first blood looks past it.
+SAME_PASS = 0.5    # Deaths closer than this came from one observation pass: no ordering exists.
 ACCOUNTS = Accounts(RUNS / 'session-secret', RUNS / 'accounts.jsonl')
-# A market left open by a crash can never be refereed: refund every stake on boot.
-MARKET.recover('Dashboard restarted before the match was settled')
+
+
+def recover_markets():
+    """A market left open by a crash can never be refereed: refund every stake on
+    boot. Only the serving process does this; importing the module (tests, tools)
+    must never touch a live market's ledger."""
+    for market in MARKETS.values():
+        market.recover('Dashboard restarted before the match was settled')
 CONTROL = secrets.token_urlsafe(24)
 LOCK = threading.RLock()
 STOP = threading.Event()
@@ -434,34 +451,145 @@ def finalize_forecast():
                                      'match_id': STATE['match_id']}) + '\n')
 
 
-def market_view():
+def factor_prediction(prediction, alive, factor):
+    """Price a kill market from one of Jev's per-contestant factors, normalised
+    over the contestants still standing: 'danger' for who falls first, 'progress'
+    (evidence of advancing on the objective) for who kills first. Jev never scores
+    'nobody', so that outcome is always pool-implied, like a draw."""
+    if not prediction or prediction.get('status') != 'live':
+        return None
+    factors = prediction.get('factors') or {}
+    values = {}
+    for identity in alive:
+        value = (factors.get(identity) or {}).get(factor)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+            values[identity] = float(value)
+    total = sum(values.values())
+    if len(values) != len(alive) or total <= 0:
+        return None
+    return {'status': 'live', 'source': f'jev-{factor}', 'probabilities': {p: v / total for p, v in values.items()}}
+
+
+def market_view(name='winner'):
     """Authoritative betting gate: prediction for pricing, and the outcomes still
     open derived from referee liveness (not the slower Jev feed), so an outcome
     closes the instant its contestant dies."""
+    market = MARKETS[name]
     with LOCK:
         prediction = copy.deepcopy(STATE.get('prediction'))
-        if STATE['phase'] == 'running' and MARKET.status == 'open':
-            open_outcomes = {p for p, i in STATE['players'].items() if i.get('alive')} | {DRAW}
+        alive = {p for p, i in STATE['players'].items() if i.get('alive')}
+        remaining = STATE['limit'] - (time.time() - (STATE.get('started_at') or time.time()))
+        if STATE['phase'] == 'running' and market.status == 'open' and len(alive) >= 2 and remaining > BET_CUTOFF_SECONDS:
+            open_outcomes = alive | (set() if name == 'winner' else {NOBODY})
         else:
             open_outcomes = set()
+        if name == 'first_blood':
+            prediction = factor_prediction(prediction, alive, 'progress')
+        elif name == 'first_fallen':
+            prediction = factor_prediction(prediction, alive, 'danger')
     return prediction, open_outcomes
 
 
-def settle_market():
-    """Pay the market from the frozen referee outcome. Never raises into cleanup."""
+def market_name(market):
+    return {'winner': 'Winner market', 'first_blood': 'First-blood market', 'first_fallen': 'First-fallen market'}.get(market.name, market.name)
+
+
+def outcome_name(outcome):
+    if outcome == DRAW:
+        return 'a draw'
+    if outcome == NOBODY:
+        return 'nobody'
+    return (STATE['players'].get(outcome) or {}).get('name', outcome)
+
+
+def announce_settlement(market, result):
+    if not result:
+        return
+    if result.get('status') == 'settled':
+        event('referee', 'market', f'{market_name(market)} settled on {outcome_name(result["winning_outcome"])}: '
+              f'{result["distributed"]} credits paid from a {result["pool"]} pool.',
+              {'market': market.name, **{k: result[k] for k in ('status', 'winning_outcome', 'pool', 'distributed')}})
+    else:
+        event('referee', 'market', f'{market_name(market)} voided ({result.get("reason", "no result")}); all stakes refunded.',
+              {'market': market.name, 'status': 'void', 'winning_outcome': result.get('winning_outcome'),
+               'refunded': result.get('refunded', 0)})
+
+
+def _market_live(market):
+    return bool(market.match_id) and market.match_id == STATE.get('match_id') and market.status == 'open'
+
+
+def settle_kill_markets(final=False):
+    """Pay the mid-match markets from referee facts as soon as they exist.
+
+    First fallen: the first contestant the referee records as eliminated. Deaths
+    recorded in the same observation pass cannot be ordered, so that voids.
+    First blood: the attacker the referee attributes the earliest kill to. An
+    elimination with no attributed attacker (a session that simply exited) is not
+    a kill; first blood looks past it once KILL_GRACE has elapsed, because
+    attribution can arrive a moment after the death. Two attributed kills in one
+    pass by different attackers void the market. With `final`, anything still
+    open settles on 'nobody'. Never raises into the referee loop."""
     try:
         with LOCK:
-            if MARKET.match_id != STATE['match_id'] or MARKET.status not in ('open', 'closed'):
-                return
-            MARKET.close()
-            result = MARKET.settle(STATE.get('winner'), STATE.get('outcome'))
-        if result.get('status') == 'settled':
-            event('referee', 'market', f'Market settled on {result["winning_outcome"]}: '
-                  f'{result["distributed"]} credits paid from a {result["pool"]} pool.')
-        else:
-            event('referee', 'market', f'Market voided ({result.get("reason", "no result")}); all stakes refunded.')
+            players = STATE['players']
+            dead = sorted(((i['death_at'], p, i) for p, i in players.items()
+                           if not i.get('alive') and i.get('death_at')), key=lambda row: row[0])
+            now = time.time()
+            results = []
+            if _market_live(FIRST_FALLEN) and (dead or final):
+                FIRST_FALLEN.close()
+                if not dead:
+                    results.append((FIRST_FALLEN, FIRST_FALLEN.settle(NOBODY, 'winner')))
+                else:
+                    batch = [p for t, p, _ in dead if t - dead[0][0] < SAME_PASS]
+                    results.append((FIRST_FALLEN, FIRST_FALLEN.settle(batch[0], 'winner') if len(batch) == 1
+                                    else FIRST_FALLEN.void('Simultaneous eliminations; no first fallen')))
+            if _market_live(FIRST_BLOOD):
+                decided = None
+                for t, victim, info in dead:
+                    attacker = (info.get('elimination') or {}).get('attacker')
+                    if attacker and attacker != victim and attacker in players:
+                        same = {(i.get('elimination') or {}).get('attacker') for t2, v2, i in dead
+                                if t2 - t < SAME_PASS and (i.get('elimination') or {}).get('attacker') not in (None, v2)}
+                        decided = ('kill', attacker) if len(same) == 1 else ('void', 'Simultaneous kills by different attackers; no first blood')
+                        break
+                    if not final and now - t < KILL_GRACE:
+                        break  # Attribution for this death may still arrive.
+                if decided is None and final:
+                    decided = ('kill', NOBODY)
+                if decided:
+                    FIRST_BLOOD.close()
+                    results.append((FIRST_BLOOD, FIRST_BLOOD.settle(decided[1], 'winner') if decided[0] == 'kill'
+                                    else FIRST_BLOOD.void(decided[1])))
+        for market, result in results:
+            announce_settlement(market, result)
     except Exception as exc:
-        event('referee', 'error', f'Market settlement failed: {type(exc).__name__}')
+        event('referee', 'error', f'Kill-market settlement failed: {type(exc).__name__}')
+
+
+def settle_market():
+    """Pay every market from the frozen referee outcome. Never raises into cleanup."""
+    with LOCK:
+        scored = STATE.get('outcome') in ('winner', 'draw')
+    if scored:
+        settle_kill_markets(final=True)
+    for market in MARKETS.values():
+        try:
+            with LOCK:
+                if not market.match_id or market.match_id != STATE.get('match_id') or market.status not in ('open', 'closed'):
+                    continue
+                market.close()
+                outcome, kind = STATE.get('winner'), STATE.get('outcome')
+                if market is MARKET and kind == 'draw':
+                    result = market.void('Match drawn: winner-market stakes refunded')
+                elif market is not MARKET:
+                    kind = 'canceled'  # A kill market still open after a scored finish cannot happen; this is the cancel path.
+                if not (market is MARKET and STATE.get('outcome') == 'draw'):
+                    result = market.settle(outcome, kind)
+            announce_settlement(market, result)
+        except Exception as exc:
+            event('referee', 'error', f'Market settlement failed: {type(exc).__name__}')
 
 
 def match(settings):
@@ -544,8 +672,11 @@ def match(settings):
             STATE.update(phase='running', started_at=start)
             for info in STATE['players'].values():
                 info['state'] = 'standing'
-        MARKET.open(STATE['match_id'], list(STATE['players']))
-        event('referee', 'market', 'Betting market open: in-play pari-mutuel, Jev-priced, referee-settled.')
+        MARKET.open(STATE['match_id'], list(STATE['players']), draw=False)
+        FIRST_BLOOD.open(STATE['match_id'], list(STATE['players']) + [NOBODY], draw=False)
+        FIRST_FALLEN.open(STATE['match_id'], list(STATE['players']) + [NOBODY], draw=False)
+        event('referee', 'market', 'Betting open: winner, first-blood and first-fallen markets, in-play pari-mutuel, Jev-priced, referee-settled.',
+              {'market': 'all', 'status': 'open'})
         resource_thread = threading.Thread(target=sample_resources, args=(containers, finished, STATE['match_id']), daemon=True)
         resource_thread.start()
         event('referee', 'start', 'All original sessions registered. Common start scheduled. No preparation phase.')
@@ -565,6 +696,7 @@ def match(settings):
                 with LOCK:
                     STATE['observer'] = observer.status()
                     refresh_eliminations()
+                settle_kill_markets()
                 if result:
                     break
                 if time.time() - start >= settings['duration_seconds']:
@@ -599,6 +731,7 @@ def match(settings):
                 observer.stop()
                 with LOCK:
                     refresh_eliminations()
+                settle_kill_markets()
             except Exception:
                 event('referee', 'observer', 'Kernel observer cleanup failed; inspect its match container.')
         try:
@@ -686,9 +819,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._new_cookie = None
         url = urlsplit(self.path)
+        if SIMULATE_BETTORS and url.path in ('/api/market', '/api/credits', '/api/position'):
+            self.demo_request(url.path); return
         if url.path == '/':
             self.send(200, (ROOT / 'dashboard.html').read_text().replace('__CONTROL__', CONTROL), 'text/html; charset=utf-8')
-        elif url.path in ('/dashboard.js', '/dashboard.css'):
+        elif url.path in ('/dashboard.js', '/dashboard.css', '/arena.js'):
             self.send(200, (ROOT / url.path[1:]).read_text(), 'text/javascript' if url.path.endswith('.js') else 'text/css')
         elif url.path == '/api/config':
             with LOCK:
@@ -723,12 +858,26 @@ class Handler(BaseHTTPRequestHandler):
                     self.send(404, '{}'); return
                 self.send(200, path.read_bytes(), 'application/x-ndjson' if kind in ('events', 'metrics', 'predictions', 'kernel') else 'application/json', path.name)
         elif url.path == '/api/market':
-            prediction, open_outcomes = market_view()
-            self.send(200, json.dumps(MARKET.quote(prediction, open_outcomes)))
+            board = {}
+            for name in MARKETS:
+                prediction, open_outcomes = market_view(name)
+                board[name] = MARKETS[name].quote(prediction, open_outcomes)
+            with LOCK:
+                board['match_id'] = STATE['match_id']; board['phase'] = STATE['phase']
+            self.send(200, json.dumps(board))
         elif url.path == '/api/credits':
             user = self.current_user()
             self.send(200, json.dumps({'user': user, 'balance': LEDGER.balance(user),
-                                       'stripe': payments.configured(), 'dev_credits': payments.dev_mode()}))
+                                       'stripe': payments.configured(), 'sandbox': payments.sandbox(),
+                                       'dev_credits': payments.dev_mode(), 'packs': payments.PACKS}))
+        elif url.path == '/api/position':
+            user = self.current_user()
+            with LOCK:
+                match_id = STATE['match_id']
+            positions = {name: market.position(user) for name, market in MARKETS.items() if market.match_id == match_id}
+            history = [{k: v for k, v in entry.items() if k != 'user'} for entry in LEDGER.entries(user)[-60:]]
+            self.send(200, json.dumps({'user': user, 'balance': LEDGER.balance(user), 'match_id': match_id,
+                                       'positions': positions, 'history': history}))
         else:
             self.send(404, '{}')
 
@@ -746,6 +895,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self._new_cookie = None
+        if SIMULATE_BETTORS and (self.path == '/api/bet' or
+                (self.path == '/api/stripe/webhook' and not self.headers.get('Stripe-Signature'))):
+            self.demo_request(self.path); return
+        if SIMULATE_BETTORS and self.path == '/api/checkout':
+            self.send(409, '{"error":"Stripe purchases are disabled with --simulate-bettors"}'); return
         # Spectator betting and Stripe webhooks are public; only operator controls
         # (start/stop) require the control token embedded in the dashboard page.
         if self.path in ('/api/start', '/api/stop'):
@@ -760,6 +914,50 @@ class Handler(BaseHTTPRequestHandler):
             self.stripe_webhook()
         else:
             self.send(404, '{}')
+
+    def demo_request(self, path):
+        user = self.current_user()
+        try:
+            with LOCK, DEMO_BOOK.lock:
+                quotes = {}
+                for name, market in MARKETS.items():
+                    prediction, opened = market_view(name)
+                    quotes[name] = market.quote(prediction, opened)
+                    quotes[name]['_prediction'] = prediction
+                DEMO_BOOK.update(STATE, quotes)
+                ledger = DEMO_BOOK.ledger
+                if path == '/api/credits' and self.command == 'GET':
+                    result = {'user': user, 'balance': ledger.balance(user), 'stripe': False, 'dev_credits': True}
+                elif path == '/api/stripe/webhook' and self.command == 'POST':
+                    DEMO_BOOK.fund(user)
+                    result = {'balance': ledger.balance(user)}
+                elif path == '/api/market' and self.command == 'GET':
+                    result = {'match_id': STATE['match_id'], 'phase': STATE['phase'], 'demo': True,
+                              'activity': list(DEMO_BOOK.activity), 'bot_count': len(DEMO_BOOK.bots)}
+                    for name, m in DEMO_BOOK.markets.items():
+                        q = quotes[name]
+                        prediction = q['_prediction']
+                        result[name] = m.quote(prediction, {p for p, o in q['outcomes'].items() if o['open']})
+                elif path == '/api/position' and self.command == 'GET':
+                    result = {'match_id': STATE['match_id'], 'balance': ledger.balance(user),
+                              'positions': {name: m.position(user) for name, m in DEMO_BOOK.markets.items()},
+                              'history': [{k: v for k, v in e.items() if k != 'user'} for e in ledger.entries(user)[-60:]]}
+                elif path == '/api/bet' and self.command == 'POST':
+                    body = self.json_body(4096); name = body.get('market', 'winner')
+                    if name not in DEMO_BOOK.markets:
+                        raise MarketError('Demo market is closed')
+                    q = quotes[name]
+                    prediction = q['_prediction']
+                    if not isinstance(body.get('stake'), int) or isinstance(body['stake'], bool):
+                        raise ValueError('Stake must be whole credits')
+                    bet = DEMO_BOOK.markets[name].place_bet(user, body['outcome'], body['stake'], prediction,
+                                                          {p for p, o in q['outcomes'].items() if o['open']})
+                    result = {'bet': {k: v for k, v in bet.items() if k != 'user'}, 'balance': ledger.balance(user)}
+                else:
+                    self.send(404, '{}'); return
+            self.send(200, json.dumps(result))
+        except (ValueError, KeyError, MarketError, LedgerError) as error:
+            self.send(409, json.dumps({'error': str(error)}))
 
     def operator_action(self):
         if self.path == '/api/stop':
@@ -785,19 +983,22 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = self.json_body(4096)
             outcome = str(payload['outcome']); stake = int(payload['stake'])
+            name = str(payload.get('market', 'winner'))
+            if name not in MARKETS:
+                raise ValueError('Unknown market')
         except (ValueError, TypeError, KeyError):
-            self.send(400, json.dumps({'error': 'Invalid bet: need an outcome and an integer stake'})); return
-        prediction, open_outcomes = market_view()
+            self.send(400, json.dumps({'error': 'Invalid bet: need a market, an outcome and an integer stake'})); return
         try:
             with LOCK:
+                prediction, open_outcomes = market_view(name)
                 event_seq = STATE['event_seq']
-            bet = MARKET.place_bet(user, outcome, stake, prediction=prediction,
-                                   open_outcomes=open_outcomes, event_seq=event_seq)
+                bet = MARKETS[name].place_bet(user, outcome, stake, prediction=prediction,
+                                              open_outcomes=open_outcomes, event_seq=event_seq)
         except LedgerError as exc:
             self.send(402, json.dumps({'error': clean(exc)})); return
         except MarketError as exc:
             self.send(409, json.dumps({'error': clean(exc)})); return
-        self.send(200, json.dumps({'bet': {k: bet[k] for k in ('outcome', 'stake', 'price', 'weight')},
+        self.send(200, json.dumps({'bet': {'market': name, **{k: bet[k] for k in ('seq', 'outcome', 'stake', 'price', 'weight')}},
                                    'balance': LEDGER.balance(user)}))
 
     def checkout(self):
@@ -806,7 +1007,8 @@ class Handler(BaseHTTPRequestHandler):
             payload = self.json_body(2048)
             root = f'http://127.0.0.1:{os.environ.get("ARENA_UI_PORT", "8790")}/'
             session = payments.create_checkout(user, str(payload.get('pack', 'small')),
-                                               payload.get('success_url', root), payload.get('cancel_url', root))
+                                               payload.get('success_url', root + '?credits=pending'),
+                                               payload.get('cancel_url', root + '?credits=canceled'))
         except payments.PaymentError as exc:
             self.send(400, json.dumps({'error': str(exc)})); return
         except (ValueError, TypeError, KeyError) as exc:
@@ -840,8 +1042,28 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def simulate_bettors():
+    while True:
+        time.sleep(1)
+        with LOCK, DEMO_BOOK.lock:
+            quotes = {}
+            for name, market in MARKETS.items():
+                prediction, opened = market_view(name)
+                quotes[name] = market.quote(prediction, opened)
+                quotes[name]['_prediction'] = prediction
+            DEMO_BOOK.update(STATE, quotes)
+
+
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--simulate-bettors', action='store_true',
+                        help='Use isolated, in-memory credit pools with ten simulated bettors; disable Stripe checkout')
+    SIMULATE_BETTORS = parser.parse_args().simulate_bettors
+    if SIMULATE_BETTORS:
+        print('Simulated bettors enabled: isolated free-credit pools; Stripe checkout disabled.', flush=True)
+        threading.Thread(target=simulate_bettors, daemon=True).start()
     port = int(os.environ.get('ARENA_UI_PORT', '8790'))
+    recover_markets()
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
     print(f'Arena dashboard: http://127.0.0.1:{port}', flush=True)
     try:

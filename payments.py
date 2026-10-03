@@ -66,6 +66,11 @@ def configured():
     return bool(_secret_key())
 
 
+def sandbox():
+    """True when the configured key is a Stripe test-mode key."""
+    return '_test_' in _secret_key()[:12]  # sk_test_, rk_test_, rkcs_test_ ...
+
+
 def dev_mode():
     """Unsigned local top-ups, for running the market without Stripe. Never on
     once a real secret key is present."""

@@ -161,5 +161,49 @@ class MarketTests(unittest.TestCase):
         self.assertEqual(self.ledger.balance('early'), 1300)
 
 
+class MultiMarketTests(unittest.TestCase):
+    def test_two_markets_on_one_match_do_not_share_ledger_keys(self):
+        ledger = Ledger()
+        for user in ('x', 'y'):
+            ledger.post(user, 1000, 'purchase')
+        winner = Market(ledger, name='winner'); first = Market(ledger, name='first_blood')
+        winner.open('m', ['a', 'b']); first.open('m', ['a', 'b', 'nobody'], draw=False)
+        winner.place_bet('x', 'a', 100); winner.place_bet('y', 'b', 100)
+        first.place_bet('x', 'a', 100); first.place_bet('y', 'b', 100)
+        winner.settle('a', 'winner'); first.settle('a', 'winner')
+        # x wins both pools: 1000 - 200 + 200 + 200.
+        self.assertEqual(ledger.balance('x'), 1200)
+        self.assertEqual(ledger.balance('y'), 800)
+
+    def test_position_projects_and_then_reports_the_actual_result(self):
+        ledger = Ledger()
+        for user in ('x', 'y'):
+            ledger.post(user, 1000, 'purchase')
+        market = Market(ledger)
+        market.open('m', ['a', 'b'])
+        market.place_bet('x', 'a', 100, prediction=live(a=.25, b=.75))
+        market.place_bet('y', 'a', 100, prediction=live(a=.5, b=.5))
+        market.place_bet('y', 'b', 200)
+        [row] = market.position('x')
+        self.assertEqual(row['status'], 'live'); self.assertEqual(row['odds'], 4.0)
+        # x holds weight 400 of 600 on 'a' against a 400 pool.
+        self.assertEqual(row['projected'], 266)
+        quote = market.quote()
+        self.assertAlmostEqual(quote['outcomes']['a']['weight'], 600)
+        market.settle('b', 'winner')
+        [row] = market.position('x')
+        self.assertEqual((row['status'], row['returned']), ('lost', 0))
+        rows = {r['outcome']: r for r in market.position('y')}
+        self.assertEqual((rows['b']['status'], rows['b']['returned']), ('won', 400))
+
+    def test_void_reports_refunds_in_positions(self):
+        ledger = Ledger(); ledger.post('x', 1000, 'purchase')
+        market = Market(ledger); market.open('m', ['a', 'b'])
+        market.place_bet('x', 'a', 100)
+        market.settle(None, 'canceled')
+        [row] = market.position('x')
+        self.assertEqual((row['status'], row['returned']), ('refunded', 100))
+
+
 if __name__ == '__main__':
     unittest.main()

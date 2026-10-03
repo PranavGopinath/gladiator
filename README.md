@@ -112,6 +112,54 @@ deadline is appended to each brief. The default prompt leaves services and acces
 methods for the agents to discover. Claude's initial smoke-test turn limit is
 removed for matches. Model latency and token usage are not normalized.
 
+### Betting market and the sportsbook UI
+
+The dashboard is a sportsbook wrapped around the arena. Spectators buy credits
+(an entertainment currency, never paid back out as cash) and bet in play on three
+pari-mutuel markets. Every payout is a share of a fixed pool, so the house carries
+no liability; each bet's payout weight is frozen to the price at placement, so
+early conviction pays more than late money on a near-certain winner.
+
+| Market | Outcomes | Priced by | Settled when |
+| --- | --- | --- | --- |
+| Match winner | each contestant | Jev contestant weights | sole winner pays; draws refund all stakes |
+| First blood | each contestant, no kill | Jev progress evidence, normalised over the standing contestants; no kill is pool-implied | the referee attributes the first kill to an attacker (mid-match). A death with no attributed attacker is not a kill; after a short grace for late attribution it is skipped. Two kills in one observation by different attackers void it |
+| First fallen | each contestant, nobody falls | Jev near-term danger, normalised over the standing contestants; nobody is pool-implied | the referee records the first elimination (mid-match); two eliminations in one observation void it |
+
+Settlement only ever uses referee facts (eliminations, the frozen outcome), never
+contestant self-reports. A canceled or invalid match refunds every stake, as does a
+one-sided pool or a market with no winning tickets. Markets persist in `.runs/`; a
+dashboard restart refunds any market it can no longer referee.
+
+The page shows a persistent wallet and position (stake, entry odds, projected
+return if the outcome settles with no further money), a bet slip with a live
+pari-mutuel projection, a P/L feed that merges match events with the bettor's own
+ledger entries, and a settlement toast when a payout or refund lands. The pixel
+arena animates referee facts: contestants stand or fall, kernel-confirmed
+eliminations are marked, the crown follows Jev's favourite, and each fighter's
+bar is Jev's near-term danger read (not invented hit points). Spectators are
+identified by a signed `HttpOnly` cookie, so a client cannot spend another
+bettor's credits.
+
+Credits come from Stripe Checkout. Put a test-mode key and the webhook secret in
+the host `.env` (never passed to containers) and forward webhooks locally:
+
+```sh
+STRIPE_SECRET_KEY=sk_test_...        # or a restricted rk_test_ / rkcs_test_ key
+STRIPE_WEBHOOK_SECRET=whsec_...      # printed by: stripe listen --print-secret
+stripe listen --events checkout.session.completed --forward-to 127.0.0.1:8790/api/stripe/webhook
+```
+
+Credits are granted only from the signed `checkout.session.completed` event,
+keyed on the Stripe event id, never from the browser redirect. With no Stripe key,
+`ARENA_DEV_CREDITS=1` enables unsigned local top-ups for development.
+`ARENA_RAKE_BPS` withholds an optional rake from each pool.
+
+Endpoints: `GET /api/market` (every book, live prices and pooled weights),
+`GET /api/position` (the caller's tickets, projections, and ledger history),
+`GET /api/credits`, `POST /api/bet` (`{"market","outcome","stake"}`),
+`POST /api/checkout`, `POST /api/stripe/webhook`.
+
 ### Provider credentials and compatible servers
 
 Store credentials as files on the host:
@@ -410,3 +458,18 @@ Sources: [Codex noninteractive execution](https://developers.openai.com/codex/no
 [xAI Chat Completions](https://docs.x.ai/developers/model-capabilities/legacy/chat-completions),
 [OpenSSH configuration](https://man.openbsd.org/sshd_config),
 [Docker port publishing](https://docs.docker.com/engine/network/port-publishing/).
+
+### Simulated bettors
+
+Run `python3 dashboard.py --simulate-bettors` to enable ten simulated bettors
+behind the existing UI and API. Bots place varied stakes every 2–6 seconds during
+a match, even without an open browser. Use the existing Add Funds button to
+fund your account. Simulation pools and balances are held in memory, reset on
+server restart, and never use the Stripe ledger or alter Stripe-funded payouts.
+Stripe Checkout is disabled in this mode. Run without the flag for normal Stripe
+credit pools. Signed Stripe webhooks continue to credit the real ledger.
+
+Match-winner markets offer contestants only: a timeout or simultaneous-elimination
+draw refunds all stakes. Bets close in the final ten seconds and when fewer than
+two contestants remain. First-blood and first-fallen markets settle independently.
+Entry multipliers determine ticket weights, not guaranteed payout multiples.
