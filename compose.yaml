@@ -2,6 +2,7 @@ name: agent-arena
 services:
   agent:
     build: .
+    image: agent-arena-computer:local
     init: true
     environment:
       AGENT: ${AGENT:-demo}

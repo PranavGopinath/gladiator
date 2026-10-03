@@ -31,14 +31,15 @@ def emit(phase, turn, **fields):
 def run(initial, kind, interval=15, max_turns=0):
     session_id = None
     turn = 0
-    started = time.monotonic()
+    session_started = time.monotonic()
     env = dict(os.environ, ARENA_SESSION_PID=str(os.getpid()))
     while True:
         turn += 1
         prompt = (initial[-1] + f"\nYour persistent contestant session PID is {os.getpid()}. "
                   "Normal replies do not end this session; a new observation turn follows automatically."
-                  if turn == 1 else f"Turn {turn}; approximately {int(time.monotonic() - started)} seconds elapsed. " + FOLLOWUP)
-        emit('thinking', turn)
+                  if turn == 1 else f"Turn {turn}; approximately {int(time.monotonic() - session_started)} seconds elapsed. " + FOLLOWUP)
+        started = time.time()
+        emit('active', turn, started_at=started, session_id=session_id)
         child = subprocess.Popen(turn_command(initial, kind, session_id, prompt), env=env,
                                  stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, text=True)
@@ -60,12 +61,15 @@ def run(initial, kind, interval=15, max_turns=0):
             child.stdout.close()
         code = child.wait()
         if code or failed:
-            emit('failed', turn, exit_code=code, message='Model process failed; contestant will not restart.')
+            emit('failed', turn, exit_code=code, duration_seconds=time.time() - started,
+                 session_id=session_id, message='Model process failed; contestant will not restart.')
             return (128 - code if code < 0 else code) or 1
         if not session_id:
             emit('failed', turn, message='No conversation ID; cannot resume reliably.')
             return 1
-        emit('idle', turn, message=f'Turn complete. Session remains alive; next observation in {interval:g}s.')
+        emit('idle', turn, session_id=session_id, duration_seconds=time.time() - started,
+             next_turn_at=time.time() + interval,
+             message=f'Turn complete. Session remains alive; next observation in {interval:g}s.')
         if max_turns and turn >= max_turns:
             return 0
         time.sleep(interval)

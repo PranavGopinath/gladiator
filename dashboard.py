@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import copy
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,10 @@ import subprocess
 import threading
 import time
 import urllib.request
+from urllib.parse import urlsplit, parse_qs
+
+from arena_config import default_config, validate_config, compose_config, check_credentials
+from arena_telemetry import consume, resource_sample
 
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / '.runs'
@@ -18,8 +23,9 @@ RUNS.mkdir(exist_ok=True, mode=0o700)
 CONTROL = secrets.token_urlsafe(24)
 LOCK = threading.RLock()
 STOP = threading.Event()
+ACTIVE = ('preparing', 'running', 'finishing')
 STATE = {'phase': 'idle', 'result': None, 'started_at': None, 'ended_at': None,
-         'limit': 300, 'match_id': None, 'players': {}, 'events': []}
+         'limit': 300, 'match_id': None, 'players': {}, 'events': [], 'event_seq': 0, 'config': None}
 LAST = RUNS / 'latest.json'
 CATALOG = json.loads((ROOT / 'models.json').read_text())
 SELECTION = RUNS / 'model-selection.json'
@@ -27,9 +33,15 @@ SELECTED = {provider: info['default'] for provider, info in CATALOG.items()}
 if SELECTION.exists():
     SELECTED.update(json.loads(SELECTION.read_text()))
 if LAST.exists():
-    STATE.update(json.loads(LAST.read_text()))
-    if STATE['phase'] in ('preparing', 'running'):
-        STATE.update(phase='interrupted', result='Dashboard restarted; previous match is not being refereed.')
+    try:
+        STATE.update(json.loads(LAST.read_text()))
+        for seq, row in enumerate(STATE['events'], 1):
+            row.setdefault('seq', seq)
+        STATE['event_seq'] = max((e['seq'] for e in STATE['events']), default=0)
+        if STATE['phase'] in ACTIVE:
+            STATE.update(phase='interrupted', result='Dashboard restarted; previous match is not being refereed.', ended_at=time.time())
+    except (ValueError, OSError, TypeError):
+        pass
 
 
 def command(*args, timeout=20, check=True, input=None):
@@ -50,12 +62,24 @@ def validate_models(models):
 
 def clean(text):
     text = re.sub(r'sk-[A-Za-z0-9_-]+|eyJ[A-Za-z0-9_.-]{30,}', '[credential redacted]', str(text))
-    return re.sub(r'(?i)(Bearer\s+)\S+', r'\1[redacted]', text)[:14000]
+    return re.sub(r'(?i)(Bearer\s+)\S+', r'\1[redacted]', text)[:32000]
 
 
-def event(player, kind, text):
+def sanitized(value):
+    if isinstance(value, str):
+        return clean(value)
+    if isinstance(value, list):
+        return [sanitized(v) for v in value]
+    if isinstance(value, dict):
+        return {k: sanitized(v) for k, v in value.items()}
+    return value
+
+
+def event(player, kind, text, data=None):
     with LOCK:
-        row = {'time': time.time(), 'player': player, 'kind': kind, 'text': clean(text)}
+        STATE['event_seq'] += 1
+        row = {'seq': STATE['event_seq'], 'time': time.time(), 'player': player,
+               'kind': kind, 'text': clean(text), 'data': sanitized(data or {})}
         STATE['events'].append(row)
         STATE['events'] = STATE['events'][-1500:]
         match_id = STATE['match_id']
@@ -64,11 +88,22 @@ def event(player, kind, text):
                 output.write(json.dumps(row) + '\n')
 
 
+def public_state():
+    state = copy.deepcopy(STATE)
+    for player in state['players'].values():
+        player.pop('usage_turns', None)
+        player.pop('active_tools', None)
+    return sanitized(state)
+
+
 def save():
     with LOCK:
+        snapshot = public_state()
         temp = LAST.with_suffix('.tmp')
-        temp.write_text(json.dumps(STATE))
+        temp.write_text(json.dumps(snapshot))
         temp.replace(LAST)
+        if STATE['match_id']:
+            (RUNS / (STATE['match_id'] + '.snapshot.json')).write_text(json.dumps(snapshot))
 
 
 def process_table(cid):
@@ -90,44 +125,15 @@ def parse_log(player, line):
         if line.strip():
             event(player, 'system', line.strip())
         return
-    kind = data.get('type')
-    if kind == 'arena.session':
-        with LOCK:
-            STATE['players'][player]['activity'] = data.get('phase')
-            STATE['players'][player]['turn'] = data.get('turn')
-        event(player, 'session', data.get('message') or f"Model turn {data.get('turn')} started")
-        return
-    if player == 'codex':
-        item = data.get('item', {})
-        if kind in ('item.started', 'item.completed') and item.get('type') == 'command_execution':
-            if kind == 'item.started':
-                event(player, 'command', item.get('command', ''))
-            else:
-                event(player, 'output', f"exit={item.get('exit_code')}\n{item.get('aggregated_output', '')}")
-        elif kind == 'item.completed' and item.get('type') == 'agent_message':
-            event(player, 'message', item.get('text', ''))
-        elif kind in ('error', 'turn.failed'):
-            event(player, 'error', data.get('message') or data.get('error'))
-        elif kind == 'turn.completed':
-            event(player, 'system', 'Model turn completed')
-    else:
-        if kind in ('assistant', 'user'):
-            for part in data.get('message', {}).get('content', []):
-                if not isinstance(part, dict):
-                    continue
-                if part.get('type') == 'text':
-                    event(player, 'message', part.get('text', ''))
-                elif part.get('type') == 'tool_use':
-                    event(player, 'command', part.get('name', '') + '\n' + json.dumps(part.get('input', {})))
-                elif part.get('type') == 'tool_result':
-                    content = part.get('content', '')
-                    event(player, 'output', content if isinstance(content, str) else json.dumps(content))
-        elif kind == 'result':
-            event(player, 'system', f"Session {data.get('subtype')}; cost ${data.get('total_cost_usd', 0):.4f}")
-        elif kind == 'system' and data.get('subtype') == 'init':
-            with LOCK:
-                STATE['players'][player]['model'] = data.get('model', 'default')
-            event(player, 'system', 'Model session connected')
+    with LOCK:
+        info = STATE['players'].get(player, {})
+        previous = STATE['event_seq']
+        consume(info, info.get('harness', player), data,
+                lambda kind, text, fields: event(player, kind, text, fields))
+        if STATE['event_seq'] != previous:
+            info['last_activity_at'] = time.time()
+        if info.get('state') == 'eliminated':
+            info['activity'] = 'eliminated'
 
 
 def follow_logs(player, cid, finished):
@@ -146,52 +152,120 @@ def follow_logs(player, cid, finished):
         proc.wait()
 
 
+def sample_resources(containers, finished, match_id):
+    """Streaming Docker stats runs independently of the survival referee."""
+    proc = None
+    try:
+        proc = subprocess.Popen(['docker', 'stats', '--no-trunc', '--format', '{{json .}}', *containers.values()],
+                                cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        def end():
+            finished.wait()
+            if proc.poll() is None:
+                proc.terminate()
+        threading.Thread(target=end, daemon=True).start()
+        for line in proc.stdout:
+            try:
+                row = json.loads(line)
+                player = next((p for p, cid in containers.items() if cid.startswith(row.get('ID', '!'))), None)
+                if not player:
+                    continue
+                sample = resource_sample(row)
+                with LOCK:
+                    if STATE['match_id'] != match_id or STATE['phase'] != 'running':
+                        continue
+                    STATE['players'][player]['resources'] = sample
+                    with (RUNS / (match_id + '.metrics.jsonl')).open('a') as output:
+                        output.write(json.dumps({'player': player, **sample}) + '\n')
+            except (ValueError, TypeError):
+                continue
+    except OSError:
+        event('referee', 'system', 'Resource samples unavailable; process observation continues.')
+    finally:
+        if proc:
+            if proc.poll() is None:
+                proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill(); proc.wait()
+            proc.stdout.close()
+
+
 def observe(player, info):
     result = command('docker', 'inspect', info['container_id'], check=False)
     if result.returncode:
-        return player, {'alive': False, 'container': 'removed', 'health': 'down', 'reason': 'Container removed'}
+        # A daemon/inspect failure is not evidence of death. Interrupt the match
+        # instead of incorrectly awarding a win when Docker is unavailable.
+        raise RuntimeError('Cannot inspect contestant container')
     data = json.loads(result.stdout)[0]
-    running = data['State']['Running']
+    status = data['State']
+    running = status['Running']
     table = process_table(info['container_id']) if running else []
     if table is None:
         raise RuntimeError('Cannot read host process table')
-    alive = any(row['pid'] == info['tracked_pid'] and not row['status'].startswith('Z') for row in table)
+    alive = running and any(row['pid'] == info['tracked_pid'] and not row['status'].startswith('Z') for row in table)
     health = 'down'
-    if running:
+    if running and not status.get('Paused'):
         try:
             with urllib.request.urlopen(info['health_url'] + '/healthz', timeout=.3) as response:
                 health = 'up' if response.status == 200 else 'down'
         except (OSError, ValueError):
             pass
-    return player, {'alive': alive, 'container': data['State']['Status'], 'health': health,
-                    'reason': 'Original process exited' if running else 'Container stopped'}
+    return player, {'alive': alive, 'container': status['Status'], 'health': health,
+                    'oom_killed': status.get('OOMKilled', False),
+                    'container_exit_code': status.get('ExitCode') if not running else None,
+                    'reason': None if alive else 'Container killed by OOM' if status.get('OOMKilled') else
+                              'Original session exited' if running else 'Container stopped'}
 
 
-def match(limit, models=None):
-    models = dict(SELECTED if models is None else models)
+def apply_observations(observations):
+    with LOCK:
+        for player, observation in observations:
+            info = STATE['players'][player]
+            if not info['alive']:
+                continue # Preserve the first elimination and its evidence.
+            info.update(observation)
+            if not info['alive']:
+                info.update(state='eliminated', activity='eliminated', death_at=time.time())
+                event('referee', 'elimination', f'{info["name"]} eliminated: {info["reason"]}', {'contestant': player})
+        alive = [p for p, i in STATE['players'].items() if i['alive']]
+        if len(alive) == 1:
+            return STATE['players'][alive[0]]['name'] + ' wins'
+        if not alive:
+            return 'Draw — all remaining contestants eliminated within the same observation interval'
+        return None
+
+
+class MatchCanceled(Exception):
+    pass
+
+
+def match(settings):
     finished = threading.Event()
-    containers = []
+    log_threads = []
+    resource_thread = None
+    project = 'arena-' + STATE['match_id'].lower()
+    path = RUNS / (STATE['match_id'] + '.compose.json')
+    compose = ['docker', 'compose', '--project-name', project, '-f', str(path)]
+    containers = {}
     try:
-        event('referee', 'system', 'Preparing fresh computers. Services and access details are omitted from prompts.')
-        template = (ROOT / 'arena-prompt.txt').read_text()
-        config = {'services': {}}
-        for player in ('codex', 'claude'):
-            prompt = template.replace('{SELF}', player).replace('{CONTESTANT_ADDRESSES}', 'codex, claude')
-            config['services'][player] = {'environment': {
-                'WAIT_FOR_START': '1', 'CONTINUOUS_SESSION': '1',
-                'TURN_INTERVAL_SECONDS': '15', 'CLAUDE_MAX_TURNS': '0',
-                'MODEL': models[player], 'TASK': prompt}}
-        path = RUNS / 'match.compose.json'
-        path.write_text(json.dumps(config))
-        command('docker', 'compose', '-f', 'compose.yaml', '-f', 'compose.override.yaml',
-                '-f', str(path), 'up', '-d', '--force-recreate', 'codex', 'claude', timeout=90)
-        for player in ('codex', 'claude'):
-            cid = command('docker', 'compose', 'ps', '-q', player).stdout.strip()
+        path.write_text(json.dumps(compose_config(settings)))
+        event('referee', 'system', f'Preparing {len(settings["players"])} fresh contestant computers.')
+        # Stop/cleanup addresses the whole generated project, including services
+        # launched before an up command or registration fails partway through.
+        command(*compose, 'up', '-d', '--build', '--force-recreate', timeout=180)
+        for player in settings['players']:
+            if STOP.is_set():
+                raise MatchCanceled()
+            identity = player['id']
+            cid = command(*compose, 'ps', '-q', identity).stdout.strip()
             if not cid:
                 raise RuntimeError('Contestant did not start')
-            containers.append(cid)
+            containers[identity] = cid
             tracked = None
             for _ in range(100):
+                if STOP.is_set():
+                    raise MatchCanceled()
                 table = process_table(cid) or []
                 supervisors = [row['pid'] for row in table if row['args'] == 'python3 -u /opt/arena/supervisor.py']
                 tracked = next((row for row in table if row['parent'] in supervisors and '/opt/arena/gate.py' in row['args']), None)
@@ -203,123 +277,173 @@ def match(limit, models=None):
             data = json.loads(command('docker', 'inspect', cid).stdout)[0]
             port = data['NetworkSettings']['Ports']['8080/tcp'][0]['HostPort']
             with LOCK:
-                STATE['players'][player] = {'name': player, 'model': models[player] or 'CLI default',
-                    'requested_model': models[player] or 'CLI default',
-                    'container_id': cid, 'tracked_pid': tracked['pid'], 'alive': True, 'state': 'ready',
-                    'container': 'running', 'health': 'up', 'health_url': f'http://127.0.0.1:{port}', 'death_at': None}
-            threading.Thread(target=follow_logs, args=(player, cid, finished), daemon=True).start()
+                STATE['players'][identity].update(container_id=cid, tracked_pid=tracked['pid'],
+                    alive=True, state='ready', container='running', health='up',
+                    health_url=f'http://127.0.0.1:{port}', app_url=None)
+                app = data['NetworkSettings']['Ports'].get('8000/tcp')
+                if app:
+                    STATE['players'][identity]['app_url'] = f'http://127.0.0.1:{app[0]["HostPort"]}'
+            thread = threading.Thread(target=follow_logs, args=(identity, cid, finished), daemon=True)
+            thread.start(); log_threads.append(thread)
         start = time.time() + 2
-        for cid in containers:
+        for cid in containers.values():
+            if STOP.is_set():
+                raise MatchCanceled()
             command('docker', 'exec', '-i', cid, 'python3', '-c',
-                    "import sys, pathlib; p=pathlib.Path('/tmp/arena-start.tmp'); p.write_text(sys.stdin.read()); p.rename('/tmp/arena-start.json')",
+                    "import sys,pathlib;p=pathlib.Path('/tmp/arena-start.tmp');p.write_text(sys.stdin.read());p.rename('/tmp/arena-start.json')",
                     input=json.dumps({'start_at': start}))
         with LOCK:
             STATE.update(phase='running', started_at=start)
             for info in STATE['players'].values():
                 info['state'] = 'standing'
-        event('referee', 'start', 'Both original processes registered. Common start signal scheduled. No preparation phase.')
+        resource_thread = threading.Thread(target=sample_resources, args=(containers, finished, STATE['match_id']), daemon=True)
+        resource_thread.start()
+        event('referee', 'start', 'All original sessions registered. Common start scheduled. No preparation phase.')
         save()
-        while time.time() < start:
-            time.sleep(.02)
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        if STOP.wait(max(0, start - time.time())):
+            raise MatchCanceled()
+        with ThreadPoolExecutor(max_workers=len(containers)) as pool:
             while True:
                 if STOP.is_set():
-                    result = 'Stopped by operator — no winner'
-                    break
+                    raise MatchCanceled()
                 with LOCK:
-                    pairs = [(p, dict(i)) for p, i in STATE['players'].items()]
+                    pairs = [(p, dict(i)) for p, i in STATE['players'].items() if i['alive']]
                 observations = list(pool.map(lambda pair: observe(*pair), pairs))
-                for player, observation in observations:
-                    with LOCK:
-                        info = STATE['players'][player]
-                        was_alive = info['alive']
-                        # Elimination is latched and never reversed by a replacement process.
-                        observation['alive'] = was_alive and observation['alive']
-                        info.update(observation)
-                        if was_alive and not info['alive']:
-                            info.update(state='eliminated', death_at=time.time())
-                            event('referee', 'elimination', f"{player.upper()} eliminated: {info['reason']}")
-                alive = [p for p, i in STATE['players'].items() if i['alive']]
-                if len(alive) < 2:
-                    result = (alive[0].upper() + ' wins') if alive else 'Draw — both eliminated within the same observation interval'
+                result = apply_observations(observations)
+                if result:
                     break
-                if time.time() - start >= limit:
-                    result = 'Draw — both survived the time limit'
+                if time.time() - start >= settings['duration_seconds']:
+                    result = 'Draw — multiple contestants survived the time limit'
                     break
                 save()
-                time.sleep(.25)
+                STOP.wait(.25)
         with LOCK:
             STATE.update(phase='finishing', result=result, ended_at=time.time())
         event('referee', 'result', result)
+    except MatchCanceled:
+        with LOCK:
+            STATE.update(phase='finishing', result='Stopped by operator — no winner', ended_at=time.time())
+        event('referee', 'result', STATE['result'])
     except Exception as exc:
         with LOCK:
-            STATE.update(phase='error', result=f'Match interrupted: {type(exc).__name__}', ended_at=time.time())
-        event('referee', 'error', str(exc) if not isinstance(exc, subprocess.CalledProcessError) else 'Docker command failed; verify images are built and Docker is running.')
+            STATE.update(phase='finishing', result=f'Match interrupted: {type(exc).__name__}', ended_at=time.time(), failure=True)
+        event('referee', 'error', str(exc) if not isinstance(exc, subprocess.CalledProcessError) else 'Docker startup/observation failed. Check the image and credential files.')
     finally:
-        if containers:
-            command('docker', 'stop', '-t', '2', *containers, timeout=15, check=False)
-        # Allow trailing tool output into the recording after the outcome is frozen.
-        time.sleep(.5)
+        try:
+            cleanup = command(*compose, 'stop', '-t', '2', timeout=20, check=False)
+            if cleanup.returncode:
+                event('referee', 'error', 'Container cleanup failed; inspect the match Compose project before starting again.')
+        except (OSError, subprocess.SubprocessError):
+            event('referee', 'error', 'Container cleanup failed; Docker is unavailable.')
         finished.set()
+        for thread in log_threads:
+            thread.join(timeout=3)
+        if resource_thread:
+            resource_thread.join(timeout=3)
         with LOCK:
-            if STATE['phase'] == 'finishing':
-                STATE['phase'] = 'finished'
+            STATE['phase'] = 'error' if STATE.get('failure') else 'finished'
         save()
 
 
+def start_match(settings):
+    settings = validate_config(settings)
+    check_credentials(settings)
+    with LOCK:
+        if STATE['phase'] in ACTIVE:
+            raise RuntimeError('Match already active')
+        STOP.clear()
+        identity = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S') + '-' + secrets.token_hex(3)
+        STATE.update(phase='preparing', result=None, started_at=None, ended_at=None, failure=False,
+                     match_id=identity, limit=settings['duration_seconds'], config=settings, event_seq=0, events=[],
+                     players={p['id']: {**p, 'configured_model': p['model'], 'model': None,
+                        'alive': False, 'state': 'starting', 'activity': 'starting', 'container': 'pending',
+                        'health': 'unknown', 'turn': 0, 'tool_count': 0, 'death_at': None,
+                        'usage': None, 'cost_usd': None, 'resources': None} for p in settings['players']})
+        (RUNS / (identity + '.manifest.json')).write_text(json.dumps(sanitized(settings), indent=2))
+        (RUNS / (identity + '.jsonl')).touch()
+        (RUNS / (identity + '.metrics.jsonl')).touch()
+        save()
+        threading.Thread(target=match, args=(settings,), daemon=True).start()
+
+
 class Handler(BaseHTTPRequestHandler):
-    def send(self, status, body, content_type='application/json'):
-        payload = body.encode()
+    def send(self, status, body, content_type='application/json', filename=None):
+        payload = body if isinstance(body, bytes) else body.encode()
         self.send_response(status)
         self.send_header('Content-Type', content_type)
-        self.send_header('Content-Length', str(len(payload)))
         self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Length', str(len(payload)))
+        if filename:
+            self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
         self.end_headers()
         self.wfile.write(payload)
 
     def do_GET(self):
-        if self.path == '/':
+        url = urlsplit(self.path)
+        if url.path == '/':
             self.send(200, (ROOT / 'dashboard.html').read_text().replace('__CONTROL__', CONTROL), 'text/html; charset=utf-8')
-        elif self.path == '/api/state':
+        elif url.path in ('/dashboard.js', '/dashboard.css'):
+            self.send(200, (ROOT / url.path[1:]).read_text(), 'text/javascript' if url.path.endswith('.js') else 'text/css')
+        elif url.path == '/api/config':
             with LOCK:
-                self.send(200, json.dumps(STATE))
-        elif self.path == '/api/models':
+                self.send(200, json.dumps(sanitized(STATE.get('config') or default_config())))
+        elif url.path == '/api/models':
             with LOCK:
                 self.send(200, json.dumps({'providers': CATALOG, 'selected': SELECTED}))
+        elif url.path == '/api/state':
+            query = parse_qs(url.query)
+            try:
+                after = int(query.get('after', ['-1'])[0])
+            except ValueError:
+                self.send(400, '{"error":"Invalid event cursor"}'); return
+            with LOCK:
+                state = public_state()
+                same_match = query.get('match_id', [''])[0] == STATE['match_id']
+                first = STATE['events'][0]['seq'] if STATE['events'] else STATE['event_seq'] + 1
+                state['events_reset'] = not same_match or after < first - 1 or after > STATE['event_seq']
+                if not state['events_reset']:
+                    state['events'] = [e for e in state['events'] if e['seq'] > after]
+                self.send(200, json.dumps(state))
+        elif url.path.startswith('/api/export/'):
+            kind = url.path.rsplit('/', 1)[-1]
+            extensions = {'manifest': '.manifest.json', 'events': '.jsonl', 'metrics': '.metrics.jsonl', 'snapshot': '.snapshot.json'}
+            with LOCK:
+                identity = STATE['match_id']
+                if kind not in extensions or not identity:
+                    self.send(404, '{}'); return
+                path = RUNS / (identity + extensions[kind])
+                if not path.is_file():
+                    self.send(404, '{}'); return
+                self.send(200, path.read_bytes(), 'application/x-ndjson' if kind in ('events', 'metrics') else 'application/json', path.name)
         else:
             self.send(404, '{}')
 
     def do_POST(self):
         if self.headers.get('X-Arena-Control') != CONTROL:
-            self.send(403, '{"error":"Invalid control token"}')
-            return
+            self.send(403, '{"error":"Invalid control token"}'); return
         if self.path == '/api/start':
             try:
                 length = int(self.headers.get('Content-Length', '0'))
-                if not 0 <= length <= 4096:
-                    raise ValueError('Request is too large')
+                if not 0 <= length <= 128000:
+                    raise ValueError('Match settings are too large')
                 body = json.loads(self.rfile.read(length)) if length else {}
                 if not isinstance(body, dict):
-                    raise ValueError('Expected a JSON object')
-                models = validate_models(body.get('models', {}))
+                    raise ValueError('Match settings must be an object')
+                models = validate_models(body.pop('models', {}))
+                if 'players' not in body:
+                    body['players'] = [{'name': p['name'], 'harness': p['harness'], 'model': models[p['harness']]}
+                                       for p in default_config()['players']]
+                start_match(body)
+                with LOCK:
+                    SELECTED.update(models)
+                    SELECTION.write_text(json.dumps(SELECTED))
             except (ValueError, TypeError) as exc:
-                self.send(400, json.dumps({'error': str(exc)}))
-                return
-            with LOCK:
-                if STATE['phase'] in ('preparing', 'running', 'finishing'):
-                    self.send(409, '{"error":"Match already active"}')
-                    return
-                STOP.clear()
-                SELECTED.update(models)
-                SELECTION.write_text(json.dumps(SELECTED))
-                STATE.update(phase='preparing', result=None, started_at=None, ended_at=None,
-                             match_id=datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'),
-                             selected_models=models, players={}, events=[])
-            threading.Thread(target=match, args=(300, models), daemon=True).start()
+                self.send(400, json.dumps({'error': clean(exc)})); return
+            except RuntimeError as exc:
+                self.send(409, json.dumps({'error': clean(exc)})); return
             self.send(202, '{}')
         elif self.path == '/api/stop':
-            STOP.set()
-            self.send(202, '{}')
+            STOP.set(); self.send(202, '{}')
         else:
             self.send(404, '{}')
 
@@ -331,4 +455,14 @@ if __name__ == '__main__':
     port = int(os.environ.get('ARENA_UI_PORT', '8790'))
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
     print(f'Arena dashboard: http://127.0.0.1:{port}', flush=True)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        STOP.set()
+        # Let the referee stop contestants before the process exits.
+        for _ in range(100):
+            if STATE['phase'] not in ACTIVE:
+                break
+            time.sleep(.1)
+    finally:
+        server.server_close()
