@@ -46,6 +46,16 @@ class SimulationTests(unittest.TestCase):
         self.assertEqual(demo.status, 'settled')
         self.assertEqual(demo._result['winning_outcome'], 'a')
 
+    def test_experiments_never_create_bot_markets(self):
+        state = self.state(); state['experiment'] = {'arm': 'training'}
+        book = DemoBook(seed=7)
+        market = Market(Ledger()); market.open('fixture', ['a', 'b'], draw=False)
+        for now in range(100, 300, 7):
+            book.update(state, {'winner': market.quote(None, {'a', 'b'})}, now)
+        self.assertEqual(book.markets, {})
+        self.assertEqual(book.activity, [])
+        self.assertEqual(book.ledger.entries(), [])
+
     def test_preparation_does_not_prevent_starting_bots(self):
         state = self.state(); state['phase'] = 'preparing'
         book = DemoBook(seed=2); book.update(state, {}, 100)

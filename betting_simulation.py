@@ -23,6 +23,12 @@ class DemoBook:
     def update(self, state, quotes, now=None):
         now = time.time() if now is None else now
         with self.lock:
+            if state.get('experiment'):
+                for market in self.markets.values():
+                    if market.status in ('open', 'closed'):
+                        market.void('Experiment matches do not accept bets')
+                self.markets = {}; self.activity = []; self.match_id = state.get('match_id')
+                return
             if state.get('match_id') != self.match_id:
                 for m in self.markets.values():
                     if m.status in ('open', 'closed'):

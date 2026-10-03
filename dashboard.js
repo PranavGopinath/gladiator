@@ -5,6 +5,7 @@ const palette = ['#ffd23f', '#e8a1ef', '#76d8e0', '#bff574', '#eeab88'];
 const harnessColors = {codex: '#10a37f', claude: '#d97757', gemini: '#4285f4', grok: '#f2f2f2', compatible: '#e8a1ef'};
 const activePhases = ['preparing', 'running', 'finishing'];
 let config = null, providers = {}, latest = null, events = [], selected = null, ready = false, connected = false, busy = false;
+let experimentState = null, experimentConnected = false, experimentBusy = false, experimentRenderKey = '';
 let cursor = 0, matchId = null, renderedFeed = '', renderedTerminal = '', setupDraft = [], highlightedSeq = null, renderedReport = '', renderedPrediction = '';
 const clone = value => JSON.parse(JSON.stringify(value));
 const node = (tag, value, className) => { const n = document.createElement(tag); if (value != null) n.textContent = value; if (className) n.className = className; return n; };
@@ -615,13 +616,17 @@ function renderPrediction() {
 /* --- Page chrome, controls, polling ---------------------------------------- */
 function updateControls() {
   const running = active();
-  $('start').disabled = !ready || !connected || running || busy;
+  $('start').disabled = !ready || !connected || running || busy || experimentBusy || !experimentConnected || !!experimentState?.pending || ['training', 'evaluation'].includes(experimentState?.experiment?.phase);
   $('start').hidden = !!running;
   $('stop').hidden = !running;
   $('stop').disabled = busy;
   $('configure').disabled = !!running;
   $('start-label').textContent = latest?.match_id ? 'Run another match' : 'Enter the arena';
   $('export').disabled = !latest?.match_id;
+  $('experiment-configure').disabled = !!running || busy || experimentBusy;
+  $('experiment-stop').hidden = !running;
+  $('experiment-stop').disabled = busy;
+  renderExperiments();
 }
 function tick() {
   const limit = latest?.config?.duration_seconds || config?.duration_seconds || 300;
@@ -630,6 +635,28 @@ function tick() {
   $('clock').textContent = duration(left);
   $('clock-sub').textContent = latest?.phase === 'running' ? (left < 60 ? 'CLUTCH · FINAL MINUTE' : 'TIME REMAINING') : latest?.ended_at ? 'FINAL' : 'TIME REMAINING';
 }
+function renderLearning() {
+  const learning = latest?.learning, sync = latest?.learning_sync;
+  $('learning-panel').hidden = !learning && !config?.learning_enabled && !sync?.pending;
+  $('learning-decisions').replaceChildren();
+  const statuses = {selected: 'Strategies selected. Learning updates after the match.', scored: 'Result saved. Controller updated.', skipped: 'Match excluded from learning.', pending: 'Outcome recorded locally. Synchronization pending.'};
+  if (learning?.evaluation_only) { statuses.selected = 'Frozen evaluation. No learning updates.'; statuses.scored = 'Evaluation result saved. Controller unchanged.'; }
+  $('learning-status').textContent = learning ? [statuses[learning.status] || learning.status,
+    `${learning.scored_matches || 0} scored matches in the selection window`,
+    `Controller ${(learning.controller_version || '').slice(0, 12)}`,
+    learning.skip_reason, learning.message, sync?.message].filter(Boolean).join(' · ')
+    : sync?.pending ? `${sync.pending} learning outcomes await synchronization.` : 'Learning is enabled for the next match. Strategies are selected when you start it.';
+  for (const decision of learning?.decisions || []) {
+    const card = node('details', null, 'learning-decision');
+    const name = latest.players?.[decision.player_id]?.name || decision.player_id;
+    const reward = learning.rewards?.[decision.player_id];
+    card.append(node('summary', `${name}${decision.role ? ` (${decision.role})` : ''} · ${decision.label}${Number.isFinite(reward) ? ` · reward ${Number(reward.toFixed(3))}` : ''}`));
+    card.append(node('p', decision.instruction || 'Existing arena instructions, unchanged.'));
+    card.append(node('p', `Selection probability: ${Math.round(decision.selection_probability * 100)}% (exploration policy, not win odds).`));
+    $('learning-decisions').append(card);
+  }
+}
+
 function render() {
   if (!config) return;
   const players = playersForView(), state = latest?.phase || 'idle';
@@ -643,7 +670,7 @@ function render() {
   $('recording').textContent = latest?.match_id ? `MATCH ${latest.match_id}` : 'LOCAL RECORDING';
   const objective = (latest?.config?.prompt || config.prompt || '').split('\n').find(line => line.trim() && !line.trim().startsWith('GAME:'));
   $('objective-label').textContent = /LAST AGENT STANDING/i.test(latest?.config?.prompt || config.prompt) ? 'Last agent standing' : objective || 'Custom objective';
-  tick(); renderKernelObserver(); renderArena(); renderObservation(); renderPlayFeed(); renderPrediction(); updateControls();
+  tick(); renderLearning(); renderKernelObserver(); renderArena(); renderObservation(); renderPlayFeed(); renderPrediction(); updateControls();
 }
 async function jsonRequest(url, options) {
   let response = await fetch(url, options);
@@ -722,6 +749,7 @@ function renderRoster() {
 function openSetup() {
   if (active() || !config) return;
   setupDraft = clone(config.players);
+  $('learning-enabled').checked = config.learning_enabled === true;
   $('duration').value = config.duration_seconds; $('interval').value = config.turn_interval_seconds; $('prompt').value = config.prompt;
   errorMessage('', 'setup-error'); renderRoster(); $('setup-dialog').showModal();
 }
@@ -738,7 +766,7 @@ $('setup-form').onsubmit = event => {
   const names = setupDraft.map(p => p.name.trim().toLowerCase());
   if (new Set(names).size !== names.length) { errorMessage('Give each contender a different name.', 'setup-error'); return; }
   if (!$('prompt').value.trim()) { errorMessage('Add an objective for the contenders.', 'setup-error'); return; }
-  config = {players: setupDraft.map((p, i) => ({...p, id: `agent-${i + 1}`, name: p.name.trim(), model: p.model.trim()})), duration_seconds: Number($('duration').value), turn_interval_seconds: Number($('interval').value), prompt: $('prompt').value};
+  config = {learning_enabled: $('learning-enabled').checked, players: setupDraft.map((p, i) => ({...p, id: `agent-${i + 1}`, name: p.name.trim(), model: p.model.trim()})), duration_seconds: Number($('duration').value), turn_interval_seconds: Number($('interval').value), prompt: $('prompt').value};
   try { localStorage.setItem('gladiator-match-config', JSON.stringify(config)); } catch (_) {}
   $('setup-dialog').close(); render();
 };
@@ -750,6 +778,38 @@ function selectTab(tab) {
   $(`${id}-tab`).onkeydown = event => { if (['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(event.key)) { event.preventDefault(); const next = event.key === 'Home' ? 'terminal' : event.key === 'End' ? 'stats' : id === 'terminal' ? 'stats' : 'terminal'; selectTab(next); $(`${next}-tab`).focus(); } };
 });
 $('expand-terminal').onclick = () => { const expanded = $('expand-terminal').getAttribute('aria-expanded') !== 'true'; $('expand-terminal').setAttribute('aria-expanded', String(expanded)); $('expand-terminal').textContent = expanded ? 'Collapse terminal ↙' : 'Expand terminal ↗'; $('terminal-feed').classList.toggle('expanded', expanded); if ($('follow').checked) $('terminal-feed').scrollTop = $('terminal-feed').scrollHeight; };
+function selectPage(page, updateHash = true) {
+  page = page === 'learning' ? 'learning' : 'arena';
+  for (const name of ['arena', 'learning']) {
+    const chosen = name === page, tab = $(`${name}-page-tab`);
+    tab.setAttribute('aria-selected', String(chosen)); tab.tabIndex = chosen ? 0 : -1;
+    tab.classList.toggle('nav-active', chosen); $(`${name}-page`).hidden = !chosen;
+  }
+  const live = $('shared-live-match'), mount = $(`${page}-live-mount`);
+  if (live.parentElement !== mount) {
+    const feeds = ['terminal-feed', 'play-feed'].map(id => [$(id), $(id).scrollTop]);
+    mount.append(live);
+    for (const [feed, position] of feeds) feed.scrollTop = position;
+  }
+  live.dataset.page = page;
+  renderExperiments();
+  document.querySelector('.skip-link').href = '#arena';
+  if (updateHash) history.pushState(null, '', `#${page}`);
+}
+for (const page of ['arena', 'learning']) {
+  $(`${page}-page-tab`).onclick = () => selectPage(page);
+  $(`${page}-page-tab`).onkeydown = event => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 'arena' : event.key === 'End' ? 'learning' : page === 'arena' ? 'learning' : 'arena';
+    selectPage(next); $(`${next}-page-tab`).focus();
+  };
+}
+window.addEventListener('hashchange', () => selectPage(location.hash.slice(1), false));
+selectPage(location.hash.slice(1), false);
+$('experiment-configure').onclick = openSetup;
+$('experiment-stop').onclick = () => control('stop');
+
 $('configure').onclick = openSetup;
 $('close-setup').onclick = () => $('setup-dialog').close();
 $('start').onclick = () => control('start'); $('stop').onclick = () => control('stop');
@@ -762,6 +822,92 @@ $('add-funds').onclick = addFunds;
 $('place-bet').onclick = placeBet;
 $('stake').oninput = renderSlip;
 document.querySelectorAll('.quick button').forEach(btn => btn.onclick = () => { const current = Math.max(0, Math.floor(Number($('stake').value) || 0)); $('stake').value = btn.dataset.add === 'max' ? Math.max(1, balance) : current + Number(btn.dataset.add); renderSlip(); });
+/* Manual experiments: the saved roster is independent of ordinary match setup. */
+async function refreshExperiments() {
+  try { experimentState = await jsonRequest('/api/experiments'); experimentConnected = true; }
+  catch (_) { experimentConnected = false; }
+  updateControls();
+}
+function tableFor(headers, rows) {
+  const table = node('table'), head = node('thead'), tr = node('tr'), body = node('tbody');
+  for (const title of headers) { const th = node('th', title); th.scope = 'col'; tr.append(th); }
+  head.append(tr); table.append(head, body);
+  for (const row of rows) {
+    const tr = node('tr');
+    for (const value of row) { const td = node('td'); if (value instanceof Node) td.append(value); else td.textContent = value; tr.append(td); }
+    body.append(tr);
+  }
+  return table;
+}
+function renderExperiments() {
+  const exp = experimentState?.experiment, running = !!active();
+  const working = busy || experimentBusy || running || !connected || !experimentConnected || !!experimentState?.pending;
+  const open = ['training', 'evaluation'].includes(exp?.phase);
+  $('experiment-phase').textContent = exp?.phase || 'No experiment';
+  $('experiment-status').textContent = !experimentConnected ? 'Experiment status unavailable. Reconnecting…' : experimentState?.sync_message || (exp ? `${exp.scored_training} scored training matches · ${exp.report.arms.baseline.completed + exp.report.arms.learned.completed} / 8 valid evaluation matches` : 'Create a fresh controller or import a compatible checkpoint. Runs start only when you click.');
+  $('experiment-setup').hidden = open;
+  $('experiment-detail').hidden = !exp;
+  $('experiment-results').hidden = !exp;
+  const rosterKey = JSON.stringify(config?.players || []);
+  if ($('experiment-learner').dataset.roster !== rosterKey) {
+    const previous = $('experiment-learner').value;
+    $('experiment-learner').replaceChildren();
+    for (const p of config?.players || []) { const option = node('option', `${p.name} · ${modelLabel(p)}`); option.value = p.id; $('experiment-learner').append(option); }
+    if ((config?.players || []).some(p => p.id === previous)) $('experiment-learner').value = previous;
+    $('experiment-learner').dataset.roster = rosterKey;
+    $('experiment-seed').replaceChildren(new Option('Fresh controller', ''));
+  }
+  for (const id of ['experiment-create', 'experiment-checkpoints', 'experiment-load', 'experiment-learner', 'experiment-seed', 'experiment-id']) $(id).disabled = working || open;
+  $('experiment-run').disabled = working || !open || !!exp?.active_run;
+  $('experiment-freeze').hidden = exp?.phase !== 'training';
+  $('experiment-freeze').disabled = working || !exp?.scored_training || !!exp?.active_run;
+  $('experiment-end').disabled = working || !open || !!exp?.active_run;
+  // Do not present a stale ordinary betting book as belonging to this experiment.
+  const learningPage = $('shared-live-match').dataset.page === 'learning';
+  for (const id of ['slip-panel', 'markets-panel', 'position-panel']) $(id).hidden = learningPage || !!latest?.experiment || open;
+  $('match-control-panel').hidden = learningPage;
+  if (!exp) return;
+  $('experiment-run').textContent = exp.phase === 'training' ? 'Run training match' : 'Run next evaluation';
+  $('experiment-provenance').textContent = `ID ${exp.id} · ${exp.seed_checkpoint ? `Seed checkpoint ${exp.seed_checkpoint}` : 'Fresh controller'}${exp.frozen_version ? ` · Frozen ${exp.frozen_version.slice(0, 12)}` : ''}`;
+  const next = exp.next;
+  $('experiment-next').textContent = exp.active_run ? `Match active · ${exp.active_run.arm} · learner ${exp.active_run.learner_id}` : next ? `Next: ${next.arm} · ${next.players.map(p => `${p.id}: ${p.name} (${p.id === next.learner_id ? 'learner' : 'fixed baseline opponent'})`).join(' · ')} · Strategy: ${next.strategy}` : 'Experiment finished. Download the report or create another experiment.';
+  const key = JSON.stringify(exp.report);
+  if (key === experimentRenderKey) return;
+  experimentRenderKey = key;
+  const percent = n => n == null ? '—' : `${(n * 100).toFixed(1)}%`;
+  const rows = Object.entries(exp.report.arms).map(([arm, r]) => [arm === 'baseline' ? 'Baseline learner' : 'Frozen learned controller', `${r.completed} / ${r.target}`, `${r.wins} / ${r.losses} / ${r.draws}`, percent(r.win_rate), r.win_rate_interval ? r.win_rate_interval.map(percent).join(' – ') : '—', r.median_victory_seconds == null ? '— (0 wins)' : `${r.median_victory_seconds.toFixed(2)}s (${r.wins} wins)`, r.invalid]);
+  $('experiment-report').replaceChildren(tableFor(['Arm', 'Valid', 'W / L / D', 'Win rate', '95% Wilson interval', 'Median time to win', 'Excluded'], rows));
+  const runs = exp.report.runs.map(r => {
+    const link = node('a', r.id); link.href = `/api/experiments/recording?match_id=${encodeURIComponent(r.id)}`; link.download = `${r.id}.jsonl`;
+    return [link, r.arm, `${r.learner_id} / seat ${r.slot + 1}`, r.valid ? r.outcome : `Excluded: ${r.reason}`, r.elapsed_seconds == null ? '—' : `${r.elapsed_seconds.toFixed(2)}s`, (r.controller_version || '').slice(0, 12)];
+  });
+  $('experiment-runs').replaceChildren(tableFor(['Recording', 'Arm', 'Learner', 'Result', 'Elapsed', 'Controller'], runs));
+}
+async function experimentAction(action, body = {}) {
+  experimentBusy = true; updateControls(); errorMessage('', 'experiment-error');
+  try {
+    const result = await jsonRequest(`/api/experiments/${action}`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Arena-Control': controlToken}, body: JSON.stringify(body)});
+    if (action === 'checkpoints') {
+      $('experiment-seed').replaceChildren(new Option('Fresh controller', ''));
+      for (const row of result) {
+        const option = new Option(`#${row.id} · ${row.created_at}${row.incompatible_reason ? ` · ${row.incompatible_reason}` : ' · compatible'}`, String(row.id));
+        option.disabled = !!row.incompatible_reason; $('experiment-seed').append(option);
+      }
+    } else { experimentState = result; experimentConnected = true; await refresh(); }
+  } catch (error) { errorMessage(error.message, 'experiment-error'); await refreshExperiments(); }
+  experimentBusy = false; updateControls();
+}
+$('experiment-checkpoints').onclick = () => experimentAction('checkpoints', {config});
+$('experiment-create').onclick = () => experimentAction('create', {config, learner: $('experiment-learner').value, checkpoint_id: $('experiment-seed').value ? Number($('experiment-seed').value) : null});
+$('experiment-load').onclick = () => experimentAction('load', {id: $('experiment-id').value.trim()});
+$('experiment-run').onclick = () => experimentAction('next');
+$('experiment-freeze').onclick = () => {
+  const exp = experimentState?.experiment;
+  if (exp && confirm(`Freeze after ${exp.scored_training} scored training matches? This fixes the controller for eight valid evaluation matches (four baseline, four learned), each started manually. Training cannot resume in this experiment.`)) experimentAction('freeze');
+};
+$('experiment-end').onclick = () => { if (confirm('End this experiment? Its history and report will remain available.')) experimentAction('end'); };
+
+
 async function init() {
   try {
     const [settings, catalog] = await Promise.all([jsonRequest('/api/config'), jsonRequest('/api/models')]);
@@ -769,10 +915,10 @@ async function init() {
     try { const stored = JSON.parse(localStorage.getItem('gladiator-match-config')); if (stored?.players?.length >= 2 && stored.players.length <= 5 && stored.players.every(p => providers[p.harness])) config = stored; } catch (_) {}
     config.players = config.players.map((p, i) => ({...p, id: `agent-${i + 1}`}));
     if (window.ArenaStage) { window.ArenaStage.mount('arena-game'); window.ArenaStage.onSelect(selectPlayer); }
-    ready = true; await refresh(); await refreshBetting(); fundsReturn();
+    ready = true; await Promise.all([refresh(), refreshExperiments()]); await refreshBetting(); fundsReturn();
   } catch (error) { errorMessage(`Could not load arena settings: ${error.message}`); }
   setTimeout(poll, 1000);
 }
-async function poll() { if (!ready) { await init(); return; } await Promise.all([refresh(), refreshBetting()]); setTimeout(poll, 1000); }
+async function poll() { if (!ready) { await init(); return; } await Promise.all([refresh(), refreshBetting(), refreshExperiments()]); setTimeout(poll, 1000); }
 setInterval(tick, 250);
 init();

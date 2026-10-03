@@ -75,7 +75,7 @@ class DashboardBettingTests(unittest.TestCase):
 
     def running_match(self):
         dashboard.STATE.update(phase='running', match_id='t1', started_at=time.time(), limit=300, events=[], event_seq=0,
-            outcome=None, winner=None, prediction={'status': 'live', 'probabilities': {'a': 0.5, 'b': 0.5}},
+            outcome=None, winner=None, experiment=None, prediction={'status': 'live', 'probabilities': {'a': 0.5, 'b': 0.5}},
             players={'a': {'name': 'A', 'id': 'a', 'alive': True, 'state': 'standing'},
                      'b': {'name': 'B', 'id': 'b', 'alive': True, 'state': 'standing'}})
         dashboard.MARKET.open('t1', ['a', 'b'], draw=False)
@@ -175,6 +175,24 @@ class DashboardBettingTests(unittest.TestCase):
         with patch.object(dashboard, 'SIMULATE_BETTORS', True):
             client.request('GET', '/api/market')
             self.assertEqual(client.request('GET', '/api/position')[1]['balance'], 1000)
+
+    def test_experiments_reject_bets_in_every_market_and_simulation(self):
+        self.running_match()
+        client = self.funded()
+        # Keep a previous open book around to test server gating, not just UI hiding.
+        dashboard.STATE['experiment'] = {'id': 'fixture', 'arm': 'training'}
+        for name in dashboard.MARKETS:
+            status, _ = client.request('POST', '/api/bet', {'market': name, 'outcome': 'a', 'stake': 100})
+            self.assertEqual(status, 409)
+        with patch.object(dashboard, 'SIMULATE_BETTORS', True):
+            client.request('POST', '/api/stripe/webhook', {})
+            client.request('GET', '/api/market')
+            self.assertEqual(dashboard.DEMO_BOOK.markets, {})
+            status, _ = client.request('POST', '/api/bet', {'outcome': 'a', 'stake': 100})
+            self.assertEqual(status, 409)
+        self.assertEqual(dashboard.LEDGER.balance(client.request('GET', '/api/credits')[1]['user']), 1000)
+        self.assertTrue(all(not m.bets for m in dashboard.MARKETS.values()))
+        dashboard.STATE['experiment'] = None
 
     def test_market_recovers_and_refunds_after_a_restart(self):
         self.running_match()

@@ -473,3 +473,13 @@ Match-winner markets offer contestants only: a timeout or simultaneous-eliminati
 draw refunds all stakes. Bets close in the final ten seconds and when fewer than
 two contestants remain. First-blood and first-fallen markets settle independently.
 Entry multipliers determine ticket weights, not guaranteed payout multiples.
+
+### Learning from matches
+
+Enable **Learn from this match** in setup to use the shared strategy controller.
+It selects starting instructions for every contestant, learns from verified
+outcomes, and persists its state in Supabase. Models remain frozen. Learning is
+off by default and does not launch matches automatically.
+
+See [strategy learning setup and behavior](docs/learning.md), including the
+one-time Supabase migration, rewards, recovery, tests, and planned Jev follow-up.
