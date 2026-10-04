@@ -106,110 +106,122 @@ const hex=c=>parseInt(c.replace('#',''),16);
  x.fillStyle='#ff2e63';x.fillRect(6,2,28,40);x.fillStyle='#0a0a16';x.fillRect(10,6,20,32);
  x.fillStyle='#ffd23f';x.fillRect(16,10,8,4);x.fillRect(14,16,12,4);x.fillRect(18,22,4,12);
 })();
-/* ---------- pixel fighter texture ---------- */
+/* ---------- TOP-DOWN pixel fighter texture (faces +x / right) ---------- */
 function fighterCanvas(color,ko){
- const c=document.createElement('canvas');c.width=16;c.height=20;const x=c.getContext('2d');
- const col=color, dark='rgba(0,0,0,.35)', steel='#cfd8e6', visor='#10131c';
- if(ko){ // tombstone
-   x.fillStyle='#4a5168';x.fillRect(4,6,8,12);x.beginPath();x.fillRect(5,3,6,4);
-   x.fillStyle='#2a2f42';x.fillRect(6,9,4,2);x.fillRect(6,12,4,2);return c;}
- // legs
- x.fillStyle=col;x.fillRect(5,16,2,4);x.fillRect(9,16,2,4);
- // body armor
- x.fillStyle=col;x.fillRect(4,9,8,7);
- x.fillStyle=dark;x.fillRect(4,14,8,2);
- // chest emblem
- x.fillStyle='#ffffff';x.fillRect(7,11,2,2);
- // arms
- x.fillStyle=col;x.fillRect(2,10,2,4);x.fillRect(12,10,2,4);
- // sword in right hand
- x.fillStyle=steel;x.fillRect(14,4,1,8);x.fillStyle='#ffd23f';x.fillRect(13,11,3,1);
- // helmet
- x.fillStyle=col;x.fillRect(5,2,6,6);
- x.fillStyle=visor;x.fillRect(6,5,4,2);
- // plume
- x.fillStyle='#ffffff';x.fillRect(7,0,2,2);
+ const c=document.createElement('canvas');c.width=16;c.height=16;const x=c.getContext('2d');
+ const col=color, dark='rgba(0,0,0,.4)', steel='#cfd8e6', light='rgba(255,255,255,.35)';
+ if(ko){ // wreckage: broken armor + skull, viewed from above
+   x.fillStyle='#3a4057';x.fillRect(4,5,8,7);
+   x.fillStyle='#262b3c';x.fillRect(3,8,3,3);x.fillRect(11,6,2,4);
+   x.fillStyle='#8a93ad';x.fillRect(6,6,4,4);x.fillStyle='#1a1d28';x.fillRect(7,7,1,1);x.fillRect(9,7,1,1);
+   return c;}
+ // circular shadow body (shoulders) seen from top
+ x.fillStyle=dark;x.fillRect(4,5,9,8);
+ x.fillStyle=col;x.fillRect(4,4,8,8);           // torso/pauldrons
+ x.fillStyle=light;x.fillRect(4,4,8,2);          // top-lit rim
+ // shoulder pads
+ x.fillStyle=col;x.fillRect(3,5,2,5);x.fillRect(11,5,2,5);
+ x.fillStyle=dark;x.fillRect(3,5,1,5);
+ // helmet dome center
+ x.fillStyle='#e9eef7';x.fillRect(6,6,4,4);
+ x.fillStyle=col;x.fillRect(7,7,2,2);            // crest tip
+ // sword extending to the right (facing)
+ x.fillStyle=steel;x.fillRect(13,7,4,2);
+ x.fillStyle='#ffd23f';x.fillRect(12,6,2,4);     // hilt/guard
+ // shield on left
+ x.fillStyle=dark;x.fillRect(2,6,2,4);
  return c;
 }
-/* ---------- Phaser scene ---------- */
-const GW=840,GH=320;
+/* ---------- Phaser scene (TOP-DOWN COLISEUM) ---------- */
+const GW=840,GH=470, CX=GW/2, CY=GH/2+6, RX=330, RY=200;
 class Arena extends Phaser.Scene{
  preload(){
    A.forEach(a=>{this.textures.addCanvas('f_'+a.id,fighterCanvas(a.color,!a.alive));});
-   // spark particle
    const p=document.createElement('canvas');p.width=4;p.height=4;const px=p.getContext('2d');px.fillStyle='#fff';px.fillRect(0,0,4,4);
    this.textures.addCanvas('spark',p);
  }
  create(){
    const g=this.add.graphics();
-   // floor
-   g.fillStyle(0x0c0c1e,1).fillRect(0,0,GW,GH);
-   g.fillStyle(0x12122a,1).fillRect(0,GH-70,GW,70);
-   // grid floor lines (perspective-ish)
-   g.lineStyle(1,0x20204a,1);
-   for(let i=0;i<=GW;i+=40)g.lineBetween(i,GH-70,i,GH);
-   for(let j=GH-70;j<=GH;j+=14)g.lineBetween(0,j,GW,j);
-   // back wall glow
-   g.fillStyle(0x1a1140,.6).fillRect(0,0,GW,GH-70);
-   // torches
-   [120,GW-120].forEach(tx=>{g.fillStyle(0x3a2a10,1).fillRect(tx-3,40,6,34);});
-   this.add.text(GW/2,24,'⚔  ARENA  ⚔',{fontFamily:'"Press Start 2P"',fontSize:'14px',color:'#2e2e5e'}).setOrigin(.5);
-   // pedestals + fighters
-   const spots={grok:GW-220,codex:220,gemini:GW/2+70,claude:GW/2-70};
-   this.sprites={};this.hpbars={};this.crowns={};
+   g.fillStyle(0x05050d,1).fillRect(0,0,GW,GH);
+   // crowd ring (spectators) around the pit
+   for(let k=0;k<420;k++){const ang=Math.random()*Math.PI*2, rr=1.04+Math.random()*0.17;
+     const px2=CX+Math.cos(ang)*RX*rr, py=CY+Math.sin(ang)*RY*rr;
+     const pal=[0x3a3d5c,0x4a3a66,0x5c3a4a,0x3a4a5c,0x55506a];
+     g.fillStyle(pal[k%pal.length],0.85).fillRect(px2,py,3,3);}
+   // outer stone wall
+   g.fillStyle(0x15152b,1).fillEllipse(CX,CY,RX*2+34,RY*2+34);
+   g.fillStyle(0x0c0c1c,1).fillEllipse(CX,CY,RX*2+10,RY*2+10);
+   // arena sand floor
+   g.fillStyle(0x161032,1).fillEllipse(CX,CY,RX*2,RY*2);
+   g.fillStyle(0x1d1540,0.6).fillEllipse(CX,CY,RX*2-40,RY*2-40);
+   // concentric rings + cross marks
+   g.lineStyle(2,0x2d2a5e,0.9);
+   [1,0.7,0.42,0.16].forEach(f=>g.strokeEllipse(CX,CY,RX*2*f,RY*2*f));
+   g.lineStyle(1,0x2d2a5e,0.5);g.lineBetween(CX-RX,CY,CX+RX,CY);g.lineBetween(CX,CY-RY,CX,CY+RY);
+   // center emblem
+   this.add.text(CX,CY,'⚔',{fontFamily:'"Press Start 2P"',fontSize:'26px',color:'#2a2650'}).setOrigin(.5).setAlpha(.6);
+   // gate pillars at 4 compass points
+   [[CX,CY-RY],[CX,CY+RY],[CX-RX,CY],[CX+RX,CY]].forEach(([gx,gy])=>{
+     g.fillStyle(0x23203f,1).fillRect(gx-7,gy-7,14,14);g.fillStyle(0xffd23f,0.25).fillRect(gx-3,gy-3,6,6);});
+
+   // battle stations: alive duel across the centre line, dead rot at their gates
+   const spots={grok:[CX+130,CY-6], codex:[CX-130,CY-6], claude:[CX,CY-RY+20], gemini:[CX,CY+RY-20]};
+   this.sprites={};this.hpbars={};this.home={};
    A.forEach(a=>{
-     const sx=spots[a.id], sy=GH-78;
-     // pedestal
-     const pg=this.add.graphics();pg.fillStyle(0x070712,1).fillEllipse(sx,sy+30,70,16);
-     pg.fillStyle(hex(a.color),a.alive?.18:.05).fillEllipse(sx,sy+30,60,12);
-     const s=this.add.image(sx,sy,'f_'+a.id).setScale(5).setOrigin(.5,1);
-     s.flipX = a.id==='grok'||a.id==='gemini'; // face center-left
+     const [sx,sy]=spots[a.id]; this.home[a.id]=[sx,sy];
+     // shadow + container base glow
+     this.add.graphics().fillStyle(0x000000,0.45).fillEllipse(sx,sy+16,46,16)
+       .fillStyle(hex(a.color),a.alive?0.16:0.05).fillEllipse(sx,sy+16,40,13);
+     const s=this.add.image(sx,sy,'f_'+a.id).setScale(a.alive?4.4:4).setOrigin(.5,.5);
+     s.flipX = a.id==='codex'; // codex faces right→centre; grok faces left
+     if(a.id==='grok') s.flipX=true;   // face toward codex (left)
+     if(a.id==='codex') s.flipX=false; // face toward grok (right)
+     if(!a.alive){s.setAlpha(.85);}
      this.sprites[a.id]=s;
-     if(!a.alive){s.setAlpha(.8);this.add.text(sx,sy-96,'K.O.',{fontFamily:'"Press Start 2P"',fontSize:'10px',color:'#ff5b6e'}).setOrigin(.5);}
-     // name + hp
-     const nmY=sy-104;
-     this.add.text(sx,nmY,a.name.toUpperCase(),{fontFamily:'"Press Start 2P"',fontSize:'8px',color: a.alive?'#fff':'#5b6788'}).setOrigin(.5);
+     // nameplate
+     const lblY=sy-46;
+     this.add.text(sx,lblY,a.name.toUpperCase(),{fontFamily:'"Press Start 2P"',fontSize:'8px',color:a.alive?'#fff':'#5b6788'}).setOrigin(.5);
+     if(!a.alive){this.add.text(sx,sy+30,'K.O.',{fontFamily:'"Press Start 2P"',fontSize:'8px',color:'#ff5b6e'}).setOrigin(.5);}
      if(a.alive){
-       const bw=84,bx=sx-bw/2,by=nmY+14;
-       this.add.graphics().fillStyle(0x05050d,1).fillRect(bx-1,by-1,bw+2,8).lineStyle(1,0x000000,1).strokeRect(bx-1,by-1,bw+2,8);
-       const bar=this.add.graphics();this.hpbars[a.id]={bar,bx,by,bw,hp:a.hp,color:a.hp>60?0x39e08a:a.hp>30?0xffd23f:0xff5b6e};
-       this.drawHP(a.id);
-       if(a.id===S.agents[0].id){ // leader crown
-         const cr=this.add.text(sx,nmY-16,'👑',{fontSize:'16px'}).setOrigin(.5);
-         this.crowns[a.id]=cr;this.tweens.add({targets:cr,y:nmY-20,duration:700,yoyo:true,repeat:-1,ease:'Sine.inOut'});
-       }
+       const bw=72,bx=sx-bw/2,by=lblY+12;
+       this.add.graphics().fillStyle(0x05050d,1).fillRect(bx-1,by-1,bw+2,7).lineStyle(1,0x000000,1).strokeRect(bx-1,by-1,bw+2,7);
+       const bar=this.add.graphics();this.hpbars[a.id]={bar,bx,by,bw,hp:a.hp,color:a.hp>60?0x39e08a:a.hp>30?0xffd23f:0xff5b6e};this.drawHP(a.id);
+       this.tweens.add({targets:s,scale:s.scale+0.18,duration:650+Math.random()*180,yoyo:true,repeat:-1,ease:'Sine.inOut'}); // breathing
+       if(a.id===S.agents[0].id){const cr=this.add.text(sx,lblY-16,'👑',{fontSize:'15px'}).setOrigin(.5);
+         this.tweens.add({targets:cr,y:lblY-20,duration:700,yoyo:true,repeat:-1,ease:'Sine.inOut'});}
      }
    });
-   // idle bob for alive fighters
-   Object.entries(this.sprites).forEach(([id,s])=>{if(byId(id).alive)
-     this.tweens.add({targets:s,y:s.y-4,duration:600+Math.random()*200,yoyo:true,repeat:-1,ease:'Sine.inOut'});});
-   this.emitter=this.add.particles(0,0,'spark',{speed:{min:40,max:140},scale:{start:1.4,end:0},lifespan:500,quantity:0,tint:[0xffd23f,0xff5b6e,0xffffff],emitting:false});
+   this.emitter=this.add.particles(0,0,'spark',{speed:{min:50,max:160},scale:{start:1.6,end:0},lifespan:520,quantity:0,tint:[0xffd23f,0xff5b6e,0xffffff],emitting:false});
    this.combatLoop();
  }
- drawHP(id){const h=this.hpbars[id];h.bar.clear();h.bar.fillStyle(h.color,1).fillRect(h.bx,h.by,h.bw*h.hp/100,6);}
- popText(x,y,txt,color){const t=this.add.text(x,y,txt,{fontFamily:'"Press Start 2P"',fontSize:'12px',color}).setOrigin(.5);
-   this.tweens.add({targets:t,y:y-34,alpha:0,duration:850,ease:'Cubic.out',onComplete:()=>t.destroy()});}
+ drawHP(id){const h=this.hpbars[id];if(!h)return;h.bar.clear();h.bar.fillStyle(h.color,1).fillRect(h.bx,h.by,h.bw*h.hp/100,5);}
+ popText(x,y,txt,color,big){const t=this.add.text(x,y,txt,{fontFamily:'"Press Start 2P"',fontSize:(big?14:11)+'px',color}).setOrigin(.5);
+   this.tweens.add({targets:t,y:y-30,alpha:0,duration:850,ease:'Cubic.out',onComplete:()=>t.destroy()});}
  attack(fromId,toId,dmg){
    const from=this.sprites[fromId],to=this.sprites[toId];if(!from||!to)return;
-   const dir=to.x>from.x?1:-1;
-   // lunge
-   this.tweens.add({targets:from,x:from.x+22*dir,duration:120,yoyo:true,ease:'Quad.out'});
-   // projectile
-   const proj=this.add.image(from.x+30*dir,from.y-60,'spark').setScale(3).setTint(hex(byId(fromId).color));
-   this.tweens.add({targets:proj,x:to.x-10*dir,duration:200,ease:'Quad.in',onComplete:()=>{
-     proj.destroy();
-     // hit: flash + shake + damage + hp drop + particles
-     to.setTintFill(0xffffff);this.time.delayedCall(70,()=>to.clearTint());
-     this.cameras.main.shake(140,0.006);
-     this.emitter.explode(16,to.x,to.y-60);
-     this.popText(to.x,to.y-96,'-'+dmg,'#ff5b6e');
-     const h=this.hpbars[toId];if(h){h.hp=Math.max(0,h.hp-dmg);h.color=h.hp>60?0x39e08a:h.hp>30?0xffd23f:0xff5b6e;this.drawHP(toId);}
-   }});
+   const [hx,hy]=this.home[fromId];
+   const ang=Math.atan2(to.y-from.y,to.x-from.x);
+   const dashX=to.x-Math.cos(ang)*48, dashY=to.y-Math.sin(ang)*48;
+   // charge in, then snap back home
+   this.tweens.add({targets:from,x:dashX,y:dashY,duration:150,ease:'Quad.in',yoyo:true,hold:60,
+     onYoyo:()=>{ // impact at apex
+       to.setTintFill(0xffffff);this.time.delayedCall(80,()=>to.clearTint());
+       this.cameras.main.shake(150,0.007);
+       this.emitter.explode(18,to.x,to.y);
+       // slash arc
+       const slash=this.add.text(to.x,to.y,'✦',{fontSize:'30px',color:'#fff'}).setOrigin(.5);
+       this.tweens.add({targets:slash,scale:2,alpha:0,duration:260,onComplete:()=>slash.destroy()});
+       this.popText(to.x,to.y-34,'-'+dmg,'#ff5b6e',dmg>=15);
+       // knockback
+       this.tweens.add({targets:to,x:to.x+Math.cos(ang)*10,y:to.y+Math.sin(ang)*10,duration:90,yoyo:true});
+       const h=this.hpbars[toId];if(h){h.hp=Math.max(0,h.hp-dmg);h.color=h.hp>60?0x39e08a:h.hp>30?0xffd23f:0xff5b6e;this.drawHP(toId);}
+     },
+     onComplete:()=>{from.x=hx;from.y=hy;}});
  }
  defend(id){const s=this.sprites[id];if(!s)return;
-   const shield=this.add.text(s.x,s.y-60,'🛡',{fontSize:'22px'}).setOrigin(.5);
-   this.tweens.add({targets:shield,alpha:0,y:s.y-78,duration:700,onComplete:()=>shield.destroy()});
-   this.popText(s.x,s.y-96,'BLOCK','#49c7ff');}
+   const ring=this.add.text(s.x,s.y,'🛡',{fontSize:'22px'}).setOrigin(.5);
+   this.tweens.add({targets:ring,alpha:0,scale:1.6,duration:650,onComplete:()=>ring.destroy()});
+   this.popText(s.x,s.y-34,'BLOCK','#49c7ff');}
  combatLoop(){
    const steps=[
      ()=>this.attack('grok','codex',18),
@@ -218,7 +230,7 @@ class Arena extends Phaser.Scene{
      ()=>this.attack('codex','grok',7),
      ()=>this.defend('grok'),
    ];let i=0;
-   this.time.addEvent({delay:1100,loop:true,callback:()=>{steps[i%steps.length]();i++;}});
+   this.time.addEvent({delay:1150,loop:true,callback:()=>{steps[i%steps.length]();i++;}});
  }
 }
 new Phaser.Game({type:Phaser.AUTO,parent:'game',
@@ -253,4 +265,11 @@ document.getElementById('season').innerHTML=[...A].sort((a,b)=>b.elo-a.elo).map(
  `<div class="srow"><span class="pos">${i+1}</span><span class="chip" style="background:${a.color}"></span>
   <span>${a.model}</span><span class="el">${a.elo}</span>
   <span class="dl" style="color:${a.streak>=0?'var(--up)':'var(--down)'}">${a.streak>0?'+'+a.streak*8:a.streak<0?a.streak*7:'0'}</span></div>`).join('');
+/* embed mode for betting layout */
+if(new URLSearchParams(location.search).has('arena')){
+  const t=document.querySelector('.top');if(t)t.style.display='none';
+  const l=document.querySelector('.low');if(l)l.style.display='none';
+  const w=document.querySelector('.wrap');if(w){w.style.padding='0';w.style.maxWidth='none';}
+  document.body.style.background='transparent';
+}
 </script></body></html>

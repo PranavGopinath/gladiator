@@ -1,4 +1,6 @@
 import json
+import hashlib
+import hmac
 import os
 import sys
 import tempfile
@@ -24,8 +26,9 @@ class Client:
         self.base = base
         self.cookie = None
 
-    def request(self, method, path, body=None):
+    def request(self, method, path, body=None, extra_headers=None):
         headers = {'Content-Type': 'application/json'}
+        headers.update(extra_headers or {})
         if self.cookie:
             headers['Cookie'] = self.cookie
         req = urllib.request.Request(self.base + path, method=method,
@@ -175,6 +178,36 @@ class DashboardBettingTests(unittest.TestCase):
         with patch.object(dashboard, 'SIMULATE_BETTORS', True):
             client.request('GET', '/api/market')
             self.assertEqual(client.request('GET', '/api/position')[1]['balance'], 1000)
+
+    def test_simulation_test_checkout_and_verified_purchase_survive_retries_and_restart(self):
+        self.running_match()
+        client = Client(self.base)
+        secret = 'whsec_fixture'
+        values = {'STRIPE_SECRET_KEY': 'sk_test_fixture', 'STRIPE_WEBHOOK_SECRET': secret}
+        with patch.object(dashboard, 'SIMULATE_BETTORS', True), \
+                patch.object(dashboard.payments, '_from_env', side_effect=lambda name: values.get(name, '')):
+            status, credits = client.request('GET', '/api/credits')
+            self.assertTrue(credits['stripe'])
+            self.assertTrue(credits['sandbox'])
+            with patch.object(dashboard.payments, 'create_checkout', return_value={'url': 'https://checkout.stripe.com/test'}) as checkout:
+                status, _ = client.request('POST', '/api/checkout', {'pack': 'small'})
+                self.assertEqual(status, 200)
+                self.assertEqual(checkout.call_args.args[0], credits['user'])
+            event = {'id': 'evt_demo_test', 'type': 'checkout.session.completed', 'data': {'object': {
+                'metadata': {'user': credits['user'], 'credits': '500'}, 'customer': 'cus_fixture'}}}
+            timestamp = str(int(time.time()))
+            raw = json.dumps(event).encode()
+            signature = hmac.new(secret.encode(), timestamp.encode() + b'.' + raw, hashlib.sha256).hexdigest()
+            signed = {'Stripe-Signature': f't={timestamp},v1={signature}'}
+            status, _ = client.request('POST', '/api/stripe/webhook', event, {'Stripe-Signature': 't=0,v1=invalid'})
+            self.assertEqual(status, 400)
+            self.assertEqual(client.request('GET', '/api/credits')[1]['balance'], 0)
+            for _ in range(2):
+                self.assertEqual(client.request('POST', '/api/stripe/webhook', event, signed)[0], 200)
+                self.assertEqual(client.request('GET', '/api/credits')[1]['balance'], 500)
+            self.assertEqual(dashboard.LEDGER.balance(credits['user']), 500)
+            with patch.object(dashboard, 'DEMO_BOOK', DemoBook(seed=7)):
+                self.assertEqual(client.request('GET', '/api/credits')[1]['balance'], 500)
 
     def test_experiments_reject_bets_in_every_market_and_simulation(self):
         self.running_match()

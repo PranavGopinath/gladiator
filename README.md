@@ -464,10 +464,13 @@ Sources: [Codex noninteractive execution](https://developers.openai.com/codex/no
 Run `python3 dashboard.py --simulate-bettors` to enable ten simulated bettors
 behind the existing UI and API. Bots place varied stakes every 2–6 seconds during
 a match, even without an open browser. Use the existing Add Funds button to
-fund your account. Simulation pools and balances are held in memory, reset on
-server restart, and never use the Stripe ledger or alter Stripe-funded payouts.
-Stripe Checkout is disabled in this mode. Run without the flag for normal Stripe
-credit pools. Signed Stripe webhooks continue to credit the real ledger.
+fund your account. Simulation wagers, pools, and balances are held in memory and
+reset on server restart. Bot activity never alters the persistent Stripe ledger
+or its payouts.
+Stripe test-mode Checkout works in this mode. Verified purchases are stored in
+the persistent ledger and mirrored once into the demo wallet, including after a
+restart. Live-mode Checkout remains disabled in simulation. Run without the flag
+for normal Stripe credit pools. Signed Stripe webhooks continue to credit the real ledger.
 
 Match-winner markets offer contestants only: a timeout or simultaneous-elimination
 draw refunds all stakes. Bets close in the final ten seconds and when fewer than
@@ -483,3 +486,19 @@ off by default and does not launch matches automatically.
 
 See [strategy learning setup and behavior](docs/learning.md), including the
 one-time Supabase migration, rewards, recovery, tests, and planned Jev follow-up.
+
+### Optional arena hazards
+
+Run `python3 dashboard.py --arena-hazards` (optionally alongside
+`--simulate-bettors`) to restore starting SSH access on one random living
+contestant every 30 seconds. A warning names the target 10 seconds beforehand.
+The reset restores the starting SSH configuration and empty root password,
+reloads the listener or starts it if stopped, and leaves existing SSH sessions
+alone. Agents can secure SSH again immediately; there is no forced exposure
+period or automatic elimination. Other defenses, such as firewall rules, remain.
+
+The match prompt explains the rule. Warnings and results appear in the event
+feed and `/tmp/arena-hazards.json` in each living contestant. Target selection
+uses the recorded match ID as its seed. Eliminated targets are skipped, and
+missed pulses do not replay in a burst. Hazards are disabled for experiment
+matches and default to off.

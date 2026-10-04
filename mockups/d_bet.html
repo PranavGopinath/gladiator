@@ -1,0 +1,164 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gladiator · Sportsbook</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=IBM+Plex+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<script src="seed.js"></script>
+<style>
+:root{--bg:#0a0a16;--ink:#e8f1f5;--dim:#9aa7c7;--faint:#5b6788;--gold:#ffd23f;--up:#39e08a;--down:#ff5b6e;--acc:#49c7ff;--panel:#13132a;--line:#262649;--stripe:#635bff}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font-family:'IBM Plex Mono',monospace;min-height:100vh;
+ background-image:radial-gradient(900px 500px at 70% -10%,#1b1b44,transparent)}
+.px{font-family:'Press Start 2P',monospace}
+.wrap{max-width:1360px;margin:0 auto;padding:14px 18px 40px}
+/* top bar */
+.top{display:flex;align-items:center;gap:14px;padding:4px 2px 14px}
+.logo .px{font-size:17px;color:#fff;text-shadow:3px 3px 0 #ff2e63}
+.logo small{display:block;font-size:7px;letter-spacing:.2em;color:var(--faint);margin-top:5px}
+.test{font-size:8px;color:#cdbbff;background:#211a4d;border:1px solid var(--stripe);padding:6px 9px;letter-spacing:.1em}
+.wallet{margin-left:auto;display:flex;align-items:center;gap:12px}
+.bal{text-align:right}.bal .n{font-family:'Press Start 2P';font-size:15px;color:var(--gold)}
+.bal small{font-size:8px;color:var(--faint);letter-spacing:.1em}
+.addf{font-family:'Press Start 2P';font-size:8px;background:var(--stripe);color:#fff;border:0;padding:10px 11px;cursor:pointer;box-shadow:0 4px 0 #3d35c9}
+.clk{text-align:right}.clk .n{font-family:'Press Start 2P';font-size:16px;color:#fff}.clk small{font-size:7px;color:var(--faint)}
+/* main grid */
+.grid{display:grid;grid-template-columns:1fr 340px;gap:14px}
+@media(max-width:1040px){.grid{grid-template-columns:1fr}}
+.arena-box{border:3px solid var(--line);border-radius:4px;overflow:hidden;background:#05050d;position:relative;height:380px}
+.arena-box iframe{width:100%;height:100%;border:0;display:block}
+.tag{position:absolute;left:10px;top:10px;z-index:3;font-size:8px;color:var(--gold);background:#0b0b1ddd;border:2px solid var(--line);padding:6px 8px}
+.panel{background:var(--panel);border:2px solid var(--line);border-radius:4px;margin-bottom:14px}
+.ph{padding:10px 13px;border-bottom:2px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+.ph .px{font-size:9px;color:#fff}.ph span{font-size:8px;color:var(--faint)}
+/* your position */
+.pos{padding:13px}
+.pos .big{font-family:'Press Start 2P';font-size:13px;color:#fff;margin-bottom:9px;display:flex;align-items:center;gap:8px}
+.pos .row{display:flex;justify-content:space-between;font-size:12px;margin:5px 0;color:var(--dim)}
+.pos .row b{color:#fff}
+.pos .pl{color:var(--up);font-weight:700}
+.cashout{margin-top:11px;width:100%;padding:12px;border:0;background:var(--up);color:#042a14;font-family:'Press Start 2P';font-size:9px;cursor:pointer;box-shadow:0 5px 0 #1f9b5c}
+/* markets */
+.mkt{padding:4px 0}
+.mrow{padding:10px 13px;border-bottom:1px solid #1b1b38}
+.mrow:last-child{border:0}
+.mrow .q{font-size:11px;color:var(--dim);margin-bottom:8px}
+.opts{display:flex;gap:7px}
+.chipbtn{flex:1;background:#0e0e22;border:2px solid var(--line);padding:8px 6px;cursor:pointer;text-align:center}
+.chipbtn.sel{border-color:var(--gold);box-shadow:0 0 0 2px #ffd23f33}
+.chipbtn.dead{opacity:.4}
+.chipbtn .nm{font-size:10px;display:flex;align-items:center;justify-content:center;gap:5px}
+.chipbtn .od{font-family:'Press Start 2P';font-size:10px;color:var(--gold);margin-top:6px}
+.chip{display:inline-block;width:8px;height:8px}
+.mv-up{color:var(--up);font-size:9px}.mv-dn{color:var(--down);font-size:9px}
+/* bet slip */
+.slip{padding:13px}
+.slip .l{font-size:9px;color:var(--faint);letter-spacing:.1em;margin-bottom:7px}
+.slip .sel{display:flex;justify-content:space-between;font-size:12px;margin-bottom:10px}
+.slip .sel b{color:#fff}.slip .sel .od{color:var(--gold)}
+.stake{display:flex;gap:6px;margin-bottom:9px}
+.stake input{flex:1;background:#05050d;border:2px solid var(--line);color:#fff;font-family:'IBM Plex Mono';padding:9px;font-size:13px}
+.quick{display:flex;gap:6px;margin-bottom:10px}
+.quick button{flex:1;background:#0e0e22;border:1px solid var(--line);color:var(--dim);font-family:'IBM Plex Mono';padding:7px;font-size:11px;cursor:pointer}
+.payout{display:flex;justify-content:space-between;font-size:12px;margin-bottom:11px}.payout b{color:var(--gold)}
+.place{width:100%;padding:13px;border:0;background:var(--gold);color:#241a00;font-family:'Press Start 2P';font-size:9px;cursor:pointer;box-shadow:0 5px 0 #b38b00}
+/* pl feed */
+.pl-feed .evt{display:flex;gap:10px;align-items:center;padding:9px 13px;border-bottom:1px solid #1b1b38;font-size:12px}
+.pl-feed .evt:last-child{border:0}
+.pl-feed .amt{margin-left:auto;font-family:'Press Start 2P';font-size:9px}
+.pl-feed .amt.win{color:var(--up)}.pl-feed .amt.lose{color:var(--down)}.pl-feed .amt.neu{color:var(--faint)}
+.pl-feed .evt.elim{background:linear-gradient(90deg,#2e0f18,transparent)}
+.lowgrid{display:grid;grid-template-columns:1fr 340px;gap:14px;margin-top:14px}
+@media(max-width:1040px){.lowgrid{grid-template-columns:1fr}}
+/* settlement toast */
+.toast{position:fixed;left:50%;top:22px;transform:translateX(-50%);z-index:50;background:#0b1f14;border:2px solid var(--up);
+ padding:14px 20px;box-shadow:0 10px 30px #000a;text-align:center}
+.toast .px{font-size:12px;color:var(--up)}.toast small{display:block;font-size:10px;color:var(--dim);margin-top:7px}
+</style></head><body>
+<div class="wrap">
+ <div class="top">
+  <div class="logo"><div class="px">GLADIATOR</div><small>SPORTSBOOK · SEASON 3</small></div>
+  <span class="test">◆ STRIPE TEST MODE</span>
+  <div class="wallet">
+   <div class="bal"><div class="n">◈ 3,960</div><small>WALLET BALANCE</small></div>
+   <button class="addf">+ ADD FUNDS</button>
+   <div class="clk"><div class="n" id="clk">00:45</div><small>CLUTCH · 2 LEFT</small></div>
+  </div>
+ </div>
+
+ <div class="grid">
+  <div>
+   <div class="arena-box">
+    <div class="tag px">▶ LIVE · YOU'RE ON GROK</div>
+    <iframe src="d_pixel.html?arena=1" title="arena"></iframe>
+   </div>
+  </div>
+  <div>
+   <div class="panel">
+    <div class="ph"><span class="px">YOUR POSITION</span><span>LIVE</span></div>
+    <div class="pos">
+     <div class="big"><span class="chip" style="background:#fff"></span> GROK · WINNER</div>
+     <div class="row"><span>Stake</span><b>◈ 250</b></div>
+     <div class="row"><span>Odds (entry)</span><b>1.47×</b></div>
+     <div class="row"><span>To return</span><b>◈ 367</b></div>
+     <div class="row"><span>Cash out now</span><b class="pl">◈ 331 ▲</b></div>
+     <button class="cashout">CASH OUT ◈ 331</button>
+    </div>
+   </div>
+   <div class="panel">
+    <div class="ph"><span class="px">BET SLIP</span><span>SELECTION</span></div>
+    <div class="slip">
+     <div class="l">SELECTION</div>
+     <div class="sel"><b>◻ Codex — First blood? NO</b><span class="od">1.9×</span></div>
+     <div class="stake"><input value="100"><span style="align-self:center;color:var(--faint)">◈</span></div>
+     <div class="quick"><button>+50</button><button>+100</button><button>MAX</button></div>
+     <div class="payout"><span>Potential return</span><b>◈ 190</b></div>
+     <button class="place">PLACE BET ◈ 100</button>
+    </div>
+   </div>
+  </div>
+ </div>
+
+ <div class="lowgrid">
+  <div class="panel pl-feed">
+   <div class="ph"><span class="px">P / L FEED</span><span id="n"></span></div>
+   <div id="feed"></div>
+  </div>
+  <div>
+   <div class="panel">
+    <div class="ph"><span class="px">MARKETS</span><span>PARI-MUTUEL</span></div>
+    <div class="mkt" id="markets"></div>
+   </div>
+  </div>
+ </div>
+</div>
+
+<div class="toast"><div class="px">◈ +81 · CODEX ELIMINATED GEMINI</div><small>First-blood NO holding · Grok winner ticket live</small></div>
+
+<script>
+const S=window.ARENA_SEED, A=S.agents, byId=i=>A.find(a=>a.id===i);
+/* markets (pari-mutuel) */
+const markets=[
+ {q:'Match winner', opts:[{id:'grok',o:1.47,mv:'up'},{id:'codex',o:3.10,mv:'dn'}]},
+ {q:'First blood', opts:[{id:'grok',o:1.80,label:'Grok',dead:false,mv:'up'},{id:'codex',o:2.05,label:'Codex',mv:'dn'}]},
+ {q:'Survive to deadline', opts:[{id:'grok',o:1.55,mv:'up'},{id:'codex',o:2.40,mv:'up'}]},
+ {q:'Total eliminations O/U 2.5', opts:[{id:null,label:'OVER',o:2.1},{id:null,label:'UNDER',o:1.7}]},
+];
+document.getElementById('markets').innerHTML=markets.map(m=>`
+ <div class="mrow"><div class="q">${m.q}</div><div class="opts">${m.opts.map(o=>{
+   const a=o.id?byId(o.id):null; const nm=o.label||(a?a.name:'');
+   return `<div class="chipbtn ${o.sel?'sel':''}"><div class="nm">${a?`<span class="chip" style="background:${a.color}"></span>`:''}${nm}</div>
+     <div class="od">${o.o.toFixed(2)}×</div><div class="${o.mv==='up'?'mv-up':o.mv==='dn'?'mv-dn':''}">${o.mv==='up'?'▲':o.mv==='dn'?'▼':''}</div></div>`;
+ }).join('')}</div></div>`).join('');
+/* P/L feed: kill feed reframed as money events */
+const money={ 'elim|grok|claude':['+36','win'], 'elim|codex|gemini':['+81','win'], 'attack|grok|codex':['-','neu'] };
+const ic={elim:'☠',attack:'⚔',defend:'🛡',think:'…',tool:'›'};
+const fd=S.feed.slice().reverse();document.getElementById('n').textContent=fd.length+' EVENTS';
+document.getElementById('feed').innerHTML=fd.map(e=>{const w=byId(e.who),tg=e.target?byId(e.target):null;
+ const k=`${e.kind}|${e.who}|${e.target||''}`;
+ let amt='',cls='neu';
+ if(e.kind==='elim'){ if(e.who==='grok'&&e.target==='claude'){amt='SETTLES';cls='neu';}
+   if(e.who==='codex'&&e.target==='gemini'){amt='+81';cls='win';} }
+ if(e.kind==='attack'&&e.target==='codex'){amt='GROK ▲';cls='win';}
+ return `<div class="evt ${e.kind}"><span>${ic[e.kind]}</span>
+  <span><b style="color:${w.color}">${w.name}</b> ${tg?`<span style="color:var(--faint)">▶</span> <b style="color:${tg.color}">${tg.name}</b>`:''} <span style="color:var(--dim)">${e.text}</span></span>
+  <span class="amt ${cls}">${amt||''}</span></div>`;}).join('');
+</script></body></html>

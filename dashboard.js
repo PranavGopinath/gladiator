@@ -104,24 +104,43 @@ function renderSpark(players) {
     const item = node('span', `${p.name.toUpperCase().slice(0, 10)} ${Number.isFinite(last) ? Math.round(last * 100) : '—'}%`); const chip = node('i', null, 'chip'); chip.style.background = color; item.prepend(chip); legend.append(item);
   });
 }
-function selectPlayer(id) { selected = id; renderedTerminal = ''; renderArena(); renderObservation(); }
+function selectPlayer(id) { if (id !== selected) sound('select'); selected = id; renderedTerminal = ''; renderArena(); renderObservation(); }
+
+/* --- Audio glue ------------------------------------------------------------ */
+const sound = name => window.ArenaAudio && window.ArenaAudio.play(name);
+function updateIntensity() {
+  if (!window.ArenaAudio) return;
+  const phase = latest?.phase, players = playersForView(), standing = players.filter(p => p.alive).length;
+  const limit = latest?.config?.duration_seconds || 300, left = latest?.started_at ? limit - (Date.now() / 1000 - latest.started_at) : limit;
+  let level = 0;
+  if (phase === 'running') level = left < 60 || standing <= 2 && players.length > 2 ? 3 : standing < players.length ? 2 : 1;
+  else if (phase === 'preparing' || phase === 'finishing') level = 1;
+  window.ArenaAudio.setIntensity(level);
+}
+function renderSoundToggles() {
+  if (!window.ArenaAudio) return;
+  $('sfx-toggle').setAttribute('aria-pressed', String(!window.ArenaAudio.muted()));
+  $('music-toggle').setAttribute('aria-pressed', String(!window.ArenaAudio.muted() && window.ArenaAudio.musicOn()));
+}
 
 /* --- Event-driven stage animation ----------------------------------------- */
 let animatedSeq = null, animationQueue = [], animationTimer = null;
 function classifyForStage(row) {
   const players = playersForView();
-  if (row.kind === 'elimination') return () => window.ArenaStage.knockout(row.data?.contestant || row.player, row.data?.attacker, row.data?.confidence === 'confirmed');
+  if (row.kind === 'elimination') return () => { window.ArenaStage.knockout(row.data?.contestant || row.player, row.data?.attacker, row.data?.confidence === 'confirmed'); sound('knockout'); };
+  if (row.kind === 'result') return () => sound(/^Draw/i.test(row.text || '') ? 'draw' : /wins/i.test(row.text || '') ? 'win' : 'refund');
+  if (row.kind === 'start') return () => sound('kickoff');
   if (!players.some(p => p.id === row.player)) return null;
-  if (row.kind === 'tool') return row.data?.status === 'failed' ? null : () => window.ArenaStage.tool(row.player);
+  if (row.kind === 'tool') return row.data?.status === 'failed' ? null : () => { window.ArenaStage.tool(row.player); sound('tool'); };
   if (row.kind === 'message') {
     const text = String(row.text || '');
     if (/^\s*(ATTACK|OFFENSE|STRIKE)\b/i.test(text)) {
       const target = players.find(p => p.id !== row.player && p.alive && (text.includes(p.name) || text.includes(p.id)))
         || players.find(p => p.id !== row.player && p.alive);
-      return () => window.ArenaStage.strike(row.player, target?.id, 'STRIKE');
+      return () => { window.ArenaStage.strike(row.player, target?.id, 'STRIKE'); sound('strike'); };
     }
-    if (/^\s*(DEFEND|DEFENSE|GUARD|HARDEN|FORTIFY)\b/i.test(text)) return () => window.ArenaStage.guard(row.player);
-    return () => window.ArenaStage.speak(row.player);
+    if (/^\s*(DEFEND|DEFENSE|GUARD|HARDEN|FORTIFY)\b/i.test(text)) return () => { window.ArenaStage.guard(row.player); sound('guard'); };
+    return () => { window.ArenaStage.speak(row.player); sound('speak'); };
   }
   return null;
 }
@@ -371,7 +390,7 @@ function trackMovement() {
   const now = Date.now();
   for (const name of MARKET_NAMES) for (const [id, o] of Object.entries(board?.[name]?.outcomes || {})) {
     const key = `${name}:${id}`, prev = lastPrices[key];
-    if (prev != null && Math.abs(o.price - prev) >= 0.005) moves[key] = {dir: o.price < prev ? 'up' : 'dn', at: now};
+    if (prev != null && Math.abs(o.price - prev) >= 0.005) { moves[key] = {dir: o.price < prev ? 'up' : 'dn', at: now}; if (slip.market === name && slip.outcome === id) sound(o.price < prev ? 'oddsUp' : 'oddsDown'); }
     lastPrices[key] = o.price;
   }
 }
@@ -380,6 +399,7 @@ function trackSettlements() {
   if (seenLedger === null) { seenLedger = new Set(entries.map(e => e.key || e.ts)); return; }
   entries.forEach(e => {
     const id = e.key || e.ts; if (seenLedger.has(id)) return; seenLedger.add(id);
+    if (e.reason === 'payout') sound('payout'); else if (e.reason === 'refund') sound('refund');
     if (e.reason === 'payout') toast(`◈ +${fmt(e.delta)} · ${outcomeLabel(e.outcome, e.market).toUpperCase()} PAYS`, `${marketTitle[e.market] || e.market} market settled by the referee.`, 'win');
     else if (e.reason === 'refund') toast(`◈ +${fmt(e.delta)} · STAKE RETURNED`, e.note || 'Market voided.', 'refund');
     else if (e.reason === 'purchase') toast(`◈ +${fmt(e.delta)} · CREDITS ADDED`, 'Stripe confirmed your payment.', 'win');
@@ -495,11 +515,11 @@ async function placeBet() {
   $('place-bet').disabled = true;
   try {
     const result = await jsonRequest('/api/bet', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({market: slip.market, outcome: slip.outcome, stake})});
-    balance = result.balance;
+    balance = result.balance; sound('ticket');
     bettingMessage(`Ticket open: ${outcomeLabel(slip.outcome, slip.market)} for ${fmt(stake)} at ×${(1 / result.bet.price).toFixed(2)}.`, 'ok');
     toast(`◈ ${fmt(stake)} ON ${outcomeLabel(slip.outcome, slip.market).toUpperCase()}`, `${marketTitle[slip.market]} · entry ${(1 / result.bet.price).toFixed(2)}× · frozen at placement`, 'bet');
     await refreshBetting();
-  } catch (error) { bettingMessage(error.message); renderSlip(); }
+  } catch (error) { sound('error'); bettingMessage(error.message); renderSlip(); }
 }
 async function addFunds() {
   $('funds-error').hidden = true;
@@ -509,7 +529,7 @@ async function addFunds() {
       const btn = node('button', null, 'pack'); btn.type = 'button';
       btn.append(node('b', `◈ ${fmt(cents)}`), node('span', `${pack} · $${(cents / 100).toFixed(2)} via Stripe Checkout`));
       btn.onclick = async () => {
-        try { const session = await jsonRequest('/api/checkout', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({pack})}); window.location.href = session.url; }
+        try { const session = await jsonRequest('/api/checkout', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({pack, success_url: `${location.origin}/?credits=pending`, cancel_url: `${location.origin}/?credits=canceled`})}); window.location.href = session.url; }
         catch (error) { $('funds-error').textContent = error.message; $('funds-error').hidden = false; }
       };
       packs.append(btn);
@@ -537,7 +557,7 @@ function fundsReturn() {
 
 /* --- Forecast chart & Jev panel (retained) --------------------------------- */
 function svgNode(tag, attrs = {}, value) { const n = document.createElementNS('http://www.w3.org/2000/svg', tag); for (const [key, v] of Object.entries(attrs)) n.setAttribute(key, v); if (value !== undefined) n.textContent = value; return n; }
-let chartMatch = null, chartSelected = null;
+let chartMatch = null, chartSelected = null, lastTickSecond = null;
 function renderForecastChart(s) {
   const chart = $('forecast-chart'), legend = $('chart-legend'), slider = $('chart-scrubber'), detail = $('chart-detail');
   const history = (s.prediction_history || []).filter(p => Number.isFinite(p.updated_at) && p.probabilities).slice().sort((a, b) => a.updated_at - b.updated_at);
@@ -633,6 +653,8 @@ function tick() {
   const elapsed = latest?.started_at ? (latest.ended_at || Date.now() / 1000) - latest.started_at : 0;
   const left = limit - elapsed;
   $('clock').textContent = duration(left);
+  if (latest?.phase === 'running' && left <= 10 && left > 0 && Math.floor(left) !== lastTickSecond) { lastTickSecond = Math.floor(left); sound('tick'); }
+  updateIntensity();
   $('clock-sub').textContent = latest?.phase === 'running' ? (left < 60 ? 'CLUTCH · FINAL MINUTE' : 'TIME REMAINING') : latest?.ended_at ? 'FINAL' : 'TIME REMAINING';
 }
 function renderLearning() {
@@ -707,7 +729,9 @@ function errorMessage(message, target = 'error') { $(target).textContent = messa
 async function control(action) {
   busy = true; updateControls(); errorMessage('');
   try {
-    await jsonRequest(`/api/${action}`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Arena-Control': controlToken}, body: JSON.stringify(action === 'start' ? config : {})});
+    const {players, duration_seconds, turn_interval_seconds, prompt, learning_enabled} = config;
+    const settings = {players, duration_seconds, turn_interval_seconds, prompt, learning_enabled};
+    await jsonRequest(`/api/${action}`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Arena-Control': controlToken}, body: JSON.stringify(action === 'start' ? settings : {})});
     await refresh();
   } catch (error) { errorMessage(error.message); }
   busy = false; updateControls();
@@ -819,6 +843,9 @@ $('export').onclick = () => $('export-dialog').showModal(); $('close-export').on
 $('close-funds').onclick = () => $('funds-dialog').close();
 $('follow').onchange = () => { if ($('follow').checked) { $('terminal-feed').scrollTop = $('terminal-feed').scrollHeight; $('play-feed').scrollTop = $('play-feed').scrollHeight; } };
 $('add-funds').onclick = addFunds;
+$('sfx-toggle').onclick = () => { window.ArenaAudio?.toggleMute(); renderSoundToggles(); if (!window.ArenaAudio?.muted()) sound('select'); };
+$('music-toggle').onclick = () => { if (window.ArenaAudio?.muted()) window.ArenaAudio.toggleMute(); else window.ArenaAudio?.toggleMusic(); renderSoundToggles(); };
+renderSoundToggles();
 $('place-bet').onclick = placeBet;
 $('stake').oninput = renderSlip;
 document.querySelectorAll('.quick button').forEach(btn => btn.onclick = () => { const current = Math.max(0, Math.floor(Number($('stake').value) || 0)); $('stake').value = btn.dataset.add === 'max' ? Math.max(1, balance) : current + Number(btn.dataset.add); renderSlip(); });

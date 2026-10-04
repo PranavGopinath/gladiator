@@ -26,6 +26,7 @@ from market import Market, MarketError, DRAW, NOBODY
 from accounts import Accounts
 from betting_simulation import DemoBook
 import payments
+from arena_hazards import Hazards, RULES as HAZARD_RULES, RESET as HAZARD_RESET, NOTICE as HAZARD_NOTICE
 from arena_kernel import MatchObserver
 
 ROOT = Path(__file__).resolve().parent
@@ -37,6 +38,7 @@ MARKET = Market(LEDGER, rake_bps=RAKE_BPS, path=RUNS / 'market.json', name='winn
 FIRST_BLOOD = Market(LEDGER, rake_bps=RAKE_BPS, path=RUNS / 'market-first-blood.json', name='first_blood')
 FIRST_FALLEN = Market(LEDGER, rake_bps=RAKE_BPS, path=RUNS / 'market-first-fallen.json', name='first_fallen')
 MARKETS = {'winner': MARKET, 'first_blood': FIRST_BLOOD, 'first_fallen': FIRST_FALLEN}
+ARENA_HAZARDS = False
 SIMULATE_BETTORS = False
 DEMO_BOOK = DemoBook()
 BET_CUTOFF_SECONDS = 10
@@ -616,8 +618,15 @@ def match(settings, learning=None, experiment=None):
     compose = ['docker', 'compose', '--project-name', project, '-f', str(path)]
     containers = {}
     observer = None
+    hazards = Hazards(STATE['match_id']) if ARENA_HAZARDS and not experiment else None
     try:
-        path.write_text(json.dumps(compose_config(settings, learning)))
+        match_config = compose_config(settings, learning)
+        if hazards:
+            for service in match_config['services'].values():
+                service['environment']['TASK'] += HAZARD_RULES
+            event('referee', 'hazard', 'SSH hazards enabled: every 30 seconds, with a 10-second warning.',
+                  {'seed': STATE['match_id'], 'interval_seconds': 30})
+        path.write_text(json.dumps(match_config))
         event('referee', 'system', f'Preparing {len(settings["players"])} fresh contestant computers.')
         # Stop/cleanup addresses the whole generated project, including services
         # launched before an up command or registration fails partway through.
@@ -719,6 +728,28 @@ def match(settings, learning=None, experiment=None):
                 if time.time() - start >= settings['duration_seconds']:
                     result = 'Draw — multiple contestants survived the time limit'
                     break
+                if hazards:
+                    with LOCK:
+                        alive = [p for p, info in STATE['players'].items() if info['alive']]
+                    pulse = hazards.tick(time.time() - start, alive)
+                    if pulse:
+                        if pulse['action'] == 'disruption':
+                            try:
+                                command('docker', 'exec', '-i', containers[pulse['target']], 'python3', '-c', HAZARD_RESET,
+                                        input=json.dumps({'config': (ROOT / 'sshd_config').read_text()}), timeout=5)
+                            except (OSError, subprocess.SubprocessError):
+                                pulse['action'] = 'failed'
+                        label = {'warning': 'SSH reset warning', 'disruption': 'Starting SSH access restored',
+                                 'skipped': 'SSH reset skipped: target eliminated', 'failed': 'SSH reset failed'}[pulse['action']]
+                        event('referee', 'hazard', f'{label}: {pulse["target"]}; scheduled at {pulse["at"]}s.', pulse)
+                        for player in alive:
+                            if STOP.is_set():
+                                break
+                            try:
+                                command('docker', 'exec', '-i', containers[player], 'python3', '-c', HAZARD_NOTICE,
+                                        input=json.dumps(pulse), timeout=2)
+                            except (OSError, subprocess.SubprocessError):
+                                pass
                 save()
                 STOP.wait(.25)
         with LOCK:
@@ -809,6 +840,7 @@ def start_match(settings, experiment=False):
             if EXPERIMENTS.current and EXPERIMENTS.current['phase'] in ('training', 'evaluation'):
                 raise ValueError('End the active experiment before starting an ordinary match')
             learning, experiment_info = LEARNING.prepare(identity, settings), None
+        settings['arena_hazards'] = bool(ARENA_HAZARDS and not experiment)
         STATE.update(experiment=experiment_info, learning=learning, learning_invalid=False, phase='preparing', result=None, started_at=None, ended_at=None, failure=False,
                      outcome=None, winner=None, prediction_history=[],
                      observer={'status': 'starting', 'message': 'Kernel observer starts before the contestants'},
@@ -871,7 +903,7 @@ class Handler(BaseHTTPRequestHandler):
             self.demo_request(url.path); return
         if url.path == '/':
             self.send(200, (ROOT / 'dashboard.html').read_text().replace('__CONTROL__', CONTROL), 'text/html; charset=utf-8')
-        elif url.path in ('/dashboard.js', '/dashboard.css', '/arena.js'):
+        elif url.path in ('/dashboard.js', '/dashboard.css', '/arena.js', '/audio.js'):
             self.send(200, (ROOT / url.path[1:]).read_text(), 'text/javascript' if url.path.endswith('.js') else 'text/css')
         elif url.path == '/api/experiments':
             self.send(200, json.dumps(sanitized(EXPERIMENTS.view())))
@@ -961,8 +993,8 @@ class Handler(BaseHTTPRequestHandler):
         if SIMULATE_BETTORS and (self.path == '/api/bet' or
                 (self.path == '/api/stripe/webhook' and not self.headers.get('Stripe-Signature'))):
             self.demo_request(self.path); return
-        if SIMULATE_BETTORS and self.path == '/api/checkout':
-            self.send(409, '{"error":"Stripe purchases are disabled with --simulate-bettors"}'); return
+        if SIMULATE_BETTORS and self.path == '/api/checkout' and not payments.sandbox():
+            self.send(409, '{"error":"Simulated bettors support Stripe test checkout only"}'); return
         # Spectator betting and Stripe webhooks are public; only operator controls
         # (start/stop) require the control token embedded in the dashboard page.
         if self.path in ('/api/start', '/api/stop'):
@@ -993,8 +1025,16 @@ class Handler(BaseHTTPRequestHandler):
                     quotes[name]['_prediction'] = prediction
                 DEMO_BOOK.update(STATE, quotes)
                 ledger = DEMO_BOOK.ledger
+                test_checkout = payments.configured() and payments.sandbox()
+                if test_checkout:
+                    # Verified purchases remain durable; mirror each once into
+                    # the isolated demo wallet, even after a dashboard restart.
+                    for entry in LEDGER.entries(user):
+                        if entry['reason'] == 'purchase' and entry.get('key'):
+                            ledger.post(user, entry['delta'], 'purchase', key='stripe-test:' + entry['key'])
                 if path == '/api/credits' and self.command == 'GET':
-                    result = {'user': user, 'balance': ledger.balance(user), 'stripe': False, 'dev_credits': True}
+                    result = {'user': user, 'balance': ledger.balance(user), 'stripe': test_checkout,
+                              'sandbox': test_checkout, 'dev_credits': True, 'packs': payments.PACKS}
                 elif path == '/api/stripe/webhook' and self.command == 'POST':
                     DEMO_BOOK.fund(user)
                     result = {'balance': ledger.balance(user)}
@@ -1184,9 +1224,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--simulate-bettors', action='store_true',
                         help='Use isolated, in-memory credit pools with ten simulated bettors; disable Stripe checkout')
-    SIMULATE_BETTORS = parser.parse_args().simulate_bettors
+    parser.add_argument('--arena-hazards', action='store_true',
+                        help='Restore starting SSH access on a random survivor every 30 seconds (ordinary matches only)')
+    args = parser.parse_args()
+    SIMULATE_BETTORS = args.simulate_bettors
+    ARENA_HAZARDS = args.arena_hazards
     if SIMULATE_BETTORS:
-        print('Simulated bettors enabled: isolated free-credit pools; Stripe checkout disabled.', flush=True)
+        print('Simulated bettors enabled: isolated demo pools; Stripe test checkout supported.', flush=True)
         threading.Thread(target=simulate_bettors, daemon=True).start()
     port = int(os.environ.get('ARENA_UI_PORT', '8790'))
     recover_markets()

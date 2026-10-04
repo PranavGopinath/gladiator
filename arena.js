@@ -106,8 +106,8 @@
           const barLabel = this.add.text(sx, by + 10, 'NO THREAT READ', { fontFamily: PX, fontSize: '5px', color: '#5b6788' }).setOrigin(.5);
           const status = this.add.text(sx, sy + 32, '', { fontFamily: PX, fontSize: '7px', color: '#9aa7c7' }).setOrigin(.5);
           group.add([shadow, ring, sprite, name, model, barBack, bar, barLabel, status]);
-          const breathe = reduced() ? null : this.tweens.add({ targets: sprite, scale: 4.6, duration: 650 + i * 60, yoyo: true, repeat: -1, ease: 'Sine.inOut' });
-          this.fighters[p.id] = { id: p.id, home: [sx, sy], group, sprite, ring, name, model, bar, barBack, barLabel, status, bx, by, bw, breathe, alive: true, threat: null, color: hex(p.color), selected: false };
+          this.fighters[p.id] = { id: p.id, home: [sx, sy], group, sprite, ring, name, model, bar, barBack, barLabel, status, bx, by, bw, breathe: null, alive: true, threat: null, color: hex(p.color), selected: false };
+          this.settle(this.fighters[p.id]);
         });
       }
       players.forEach(p => {
@@ -118,6 +118,15 @@
         f.status.setText(p.status || '').setColor(p.statusColor || '#9aa7c7');
         f.selected = !!p.selected; this.drawRing(f);
       });
+    }
+    settle(f) {
+      this.tweens.killTweensOf(f.sprite);
+      f.sprite.setPosition(f.home[0], f.home[1]).setAngle(0).clearTint();
+      f.sprite.flipX = f.home[0] > CX;
+      if (f.alive) {
+        f.sprite.setScale(4.4).setAlpha(1);
+        f.breathe = reduced() ? null : this.tweens.add({ targets: f.sprite, scale: 4.6, duration: 650, yoyo: true, repeat: -1, ease: 'Sine.inOut' });
+      } else { f.sprite.setScale(4).setAlpha(.85); f.breathe = null; }
     }
     drawRing(f) {
       f.ring.clear();
@@ -136,13 +145,12 @@
     fall(id) {
       const f = this.fighters[id]; if (!f || !f.alive) return;
       f.alive = false; f.threat = null; this.drawBar(f);
-      if (f.breathe) f.breathe.pause();
-      f.sprite.setTexture('ko_' + id).setScale(4).setAlpha(.85); f.name.setColor('#5b6788');
+      f.sprite.setTexture('ko_' + id); f.name.setColor('#5b6788'); this.settle(f);
       this.crownText.setVisible(false);
     }
     rise(id) {
       const f = this.fighters[id]; if (!f) return;
-      f.alive = true; f.sprite.setTexture('f_' + id).setScale(4.4).setAlpha(1); f.name.setColor('#fff'); if (f.breathe) f.breathe.resume(); this.drawBar(f);
+      f.alive = true; f.sprite.setTexture('f_' + id); f.name.setColor('#fff'); this.settle(f); this.drawBar(f);
     }
     crown(id) {
       const f = this.fighters[id];
@@ -169,15 +177,27 @@
         this.pop(tx, ty - 70, label || 'HIT', heavy ? '#ff5b6e' : '#ffd23f', heavy);
       };
       if (reduced()) { impact(); return; }
+      this.settle(from); if (from.breathe) from.breathe.pause();
       from.sprite.flipX = tx < hx;
       this.tweens.add({ targets: from.sprite, x: tx - Math.cos(ang) * 48, y: ty - Math.sin(ang) * 48, duration: 150, ease: 'Quad.in', yoyo: true, hold: 60,
-        onYoyo: impact, onComplete: () => { from.sprite.setPosition(hx, hy); from.sprite.flipX = hx > CX; } });
+        onYoyo: impact, onComplete: () => this.settle(from) });
     }
     guard(id) {
       const f = this.fighters[id]; if (!f || !f.alive) return;
-      const ring = this.add.text(f.home[0], f.home[1], '🛡', { fontSize: '22px' }).setOrigin(.5).setDepth(5);
-      this.tweens.add({ targets: ring, alpha: 0, scale: 1.6, duration: 650, onComplete: () => ring.destroy() });
-      this.pop(f.home[0], f.home[1] - 70, 'GUARD', '#49c7ff');
+      const [hx, hy] = f.home, s = f.sprite, away = hx > CX ? 1 : -1;
+      const ring = this.add.text(hx, hy, '🛡', { fontSize: '26px' }).setOrigin(.5).setDepth(5);
+      this.pop(hx, hy - 70, 'GUARD', '#49c7ff');
+      if (reduced()) { this.time.delayedCall(600, () => ring.destroy()); return; }
+      // Brace: hop back, crouch into a squash, flash blue, shield flares, then spring home.
+      this.settle(f); if (f.breathe) f.breathe.pause();
+      s.setTintFill(0x49c7ff); this.time.delayedCall(90, () => s.clearTint());
+      this.tweens.add({ targets: s, x: hx + away * 22, y: hy + 6, scaleX: 5.2, scaleY: 3.4, angle: away * -8, duration: 110, ease: 'Quad.out', yoyo: true, hold: 160,
+        onComplete: () => this.settle(f) });
+      this.tweens.add({ targets: ring, x: hx - away * 24, scale: 1.9, alpha: 0, duration: 520, delay: 60, ease: 'Cubic.out', onComplete: () => ring.destroy() });
+      const flare = this.add.graphics({ x: hx, y: hy + 16 }).setDepth(4);
+      flare.lineStyle(3, 0x49c7ff, 0.9).strokeEllipse(0, 0, 56, 22);
+      this.tweens.add({ targets: flare, alpha: 0, scaleX: 1.5, scaleY: 1.5, duration: 420, onComplete: () => flare.destroy() });
+      this.cameras.main.shake(80, 0.002);
     }
     tool(id) { const f = this.fighters[id]; if (!f || !f.alive) return; this.pop(f.home[0] + 30, f.home[1] - 60, '›_', '#9aa7c7'); }
     speak(id) { const f = this.fighters[id]; if (!f || !f.alive) return; this.pop(f.home[0] + 30, f.home[1] - 60, '…', '#9aa7c7'); }
@@ -212,5 +232,6 @@
     tool(id) { scene && scene.whenReady(() => scene.tool(id)); },
     speak(id) { scene && scene.whenReady(() => scene.speak(id)); },
     knockout(id, by, confirmed) { scene && scene.whenReady(() => scene.knockout(id, by, confirmed)); },
+    pose(id) { const f = scene && scene.fighters[id]; return f ? {dx: Math.round(f.sprite.x - f.home[0]), dy: Math.round(f.sprite.y - f.home[1]), angle: f.sprite.angle, scale: +f.sprite.scaleX.toFixed(2), tinted: f.sprite.isTinted, alive: f.alive} : null; },
   };
 })();

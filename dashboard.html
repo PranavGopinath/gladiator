@@ -4,7 +4,7 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="arena-control" content="__CONTROL__"><meta name="theme-color" content="#0a0a16"><title>Gladiator — Sportsbook</title>
 <link rel="stylesheet" href="/dashboard.css">
 <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
-<script src="/arena.js" defer></script><script src="/dashboard.js" defer></script>
+<script src="/arena.js" defer></script><script src="/audio.js" defer></script><script src="/dashboard.js" defer></script>
 </head><body>
 <a class="skip-link" href="#arena">Skip to arena</a>
 <header class="top">
@@ -12,6 +12,7 @@
   <nav class="page-tabs" role="tablist" aria-label="Arena pages"><button id="arena-page-tab" role="tab" aria-selected="true" aria-controls="arena-page">Arena</button><button id="learning-page-tab" role="tab" aria-selected="false" aria-controls="learning-page" tabindex="-1">Learning</button></nav>
   <span id="live-tag" class="live-tag">LOBBY</span>
   <div class="connection"><span class="connection-dot" id="connection-dot"></span><span id="connection">Connecting</span></div>
+  <div class="sound"><button id="sfx-toggle" class="sound-btn" type="button" aria-pressed="false" title="Sound effects">♪ SFX</button><button id="music-toggle" class="sound-btn" type="button" aria-pressed="false" title="Music">♫ MUSIC</button></div>
   <div class="wallet">
     <div class="bal"><div class="n px"><span aria-hidden="true">◈</span> <span id="wallet-balance">0</span></div><small>WALLET BALANCE</small></div>
     <button id="add-funds" class="px addf" type="button">+ ADD FUNDS</button>
